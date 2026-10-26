@@ -37,6 +37,7 @@ export interface TurnSandboxContext {
   scopeId: ScopeId;
   memoryScopeId: ScopeId;
   transferId: string;
+  swarmSandboxId: string | undefined;
   turnSessionDir: string;
   turnFilesDir: string;
   connectorEnv: Record<string, string>;
@@ -59,6 +60,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     scopeId,
     memoryScopeId,
     transferId,
+    swarmSandboxId,
     turnSessionDir,
     turnFilesDir,
     connectorEnv,
@@ -197,9 +199,8 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
       const resource = await deps.sandboxResources?.resolve(memoryScopeId);
       if (resource && resource.ownerScopeId !== scopeId) throw new Error("External Slack requires its own sandbox.");
     }
-    const swarmBinding = await deps.swarms?.binding(input);
     const handle = await deps.sandbox.provision(resolution.layers, {
-      ...(swarmBinding?.sandboxId ? { sandboxId: swarmBinding.sandboxId } : {}),
+      ...(swarmSandboxId ? { sandboxId: swarmSandboxId } : {}),
       env: connectorEnv,
       egress: resolution.egress,
       ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),

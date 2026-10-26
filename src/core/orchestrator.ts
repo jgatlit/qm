@@ -1928,6 +1928,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         scopeId,
         memoryScopeId,
         transferId,
+        swarmSandboxId: swarmBinding?.sandboxId,
         turnSessionDir,
         turnFilesDir,
         connectorEnv,

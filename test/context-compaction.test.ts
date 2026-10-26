@@ -38,6 +38,7 @@ import {
 import { countTokens } from "../src/util/tokens.ts";
 import type { Harness, HarnessCompactInput } from "../src/harness/harness.ts";
 import type { SessionStore } from "../src/sessions/session-store.ts";
+import type { TeamStore } from "../src/teams/teams.ts";
 import { contextSummaryPayload, createContextSummaryPayload } from "../src/sessions/session-store.ts";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
 import { scopeId, type Conversation, type Principal, type SessionEntry } from "../src/types.ts";
@@ -108,6 +109,7 @@ function buildOrchestrator(
   maxContextTokens?: number,
   defaultTurnWallClockMs?: number,
   swarm?: Awaited<ReturnType<typeof swarmFixture>>,
+  teams?: TeamStore,
 ) {
   const config = createMemoryConfigStore(ORG);
   const acl = createAclStore();
@@ -133,6 +135,7 @@ function buildOrchestrator(
     files: createMemoryFileArtifactStore(createMemoryDurableByteStore()),
     sandbox: swarm?.sandbox ?? fakeSandbox(),
     ...(swarm ? { swarms: swarm.service, sandboxResources: swarm.sandboxes } : {}),
+    ...(teams ? { teams } : {}),
     modelGateway: createModelGateway(),
     auditLog,
     errors,
@@ -1365,6 +1368,38 @@ test("verified swarm workers resolve their own defaults instead of copying the r
     ]);
     assert.equal(run.request.model, undefined, "workers do not copy the root runtime");
   }
+});
+
+test("a teamed owner's swarm worker can start its default computer mid-turn", async () => {
+  const f = await swarmFixture();
+  const [peer] = await f.service.spawn(f.caller, { requestId: "initial", text: "work" });
+  await f.service.sweep();
+  const worker = await f.workerCaller(peer!.id);
+  if (worker.kind !== "agent") throw new Error("expected worker");
+  const run = (await f.runs.get(worker.claims.runId!))!;
+  const team = { id: "eng", name: "Eng", isolatedInOpen: false, configured: false, present: new Set(["alice"]) };
+  const teams: TeamStore = {
+    list: async () => [],
+    forTurn: async () => [team],
+    isMember: async (id) => id === "alice",
+    apply: async () => {},
+  };
+  const base = createMockHarness();
+  const harness: Harness = {
+    ...base,
+    turns: {
+      ...base.turns,
+      runTurn: async (turn) => {
+        const result = await turn.tools.execute("true");
+        return { reply: `exit ${result.code}` };
+      },
+    },
+  };
+  const built = buildOrchestrator(harness, undefined, undefined, f, teams);
+  const result = await built.orch.handleTurn({ ...run.request, runId: run.id });
+  assert.equal(result.status, "ok", JSON.stringify(result));
+  assert.equal(result.reply, "exit 0");
+  assert.equal(f.provisioned.at(-1), `sandbox-${peer!.sandboxId}`);
 });
 
 test("swarm workers keep the runtime chosen at spawn over the category and scope defaults", async () => {

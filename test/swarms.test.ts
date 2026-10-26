@@ -915,6 +915,7 @@ test("the orchestrator sandbox path selects worker storage without changing auth
     scopeId: root.scopeId,
     memoryScopeId: storageScopeId,
     transferId: "transfer",
+    swarmSandboxId: binding.sandboxId,
     turnSessionDir: "/tmp/session",
     turnFilesDir: "/tmp/files",
     connectorEnv: {},
