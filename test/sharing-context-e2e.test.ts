@@ -218,7 +218,7 @@ test("sharing e2e: a delegated turn shares its live parent's access under curren
   assert.match(await childTurn(read, "refused"), /access is no longer current/);
 });
 
-test("sharing e2e: a new group DM's verified roster carries helpers before any crawl and yields to a newer one", async (t) => {
+test("sharing e2e: a new group DM's verified roster carries helpers before any crawl", async (t) => {
   const b = await fixture(t);
   await b.featureFlags.setEnabled("persistent_subagents", "personal:U1", true, "test");
   await b.app.upsertGroups([{ groupId: "G-OLD", principalId: "U1" }], Date.now() - 60_000, ["G-OLD"], ["G-OLD"]);
