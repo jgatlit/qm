@@ -514,7 +514,11 @@ export function createPostgresDirectoryStore(connectionString: string): Director
         syncedAt,
         async (client) => {
           const protectedIds = await newerObservations(client, "directory_groups", syncedAt, partial);
-          if (partial && listedIds.some((groupId) => protectedIds.has(groupId))) return false;
+          const stale = partial ? listedIds.find((groupId) => protectedIds.has(groupId)) : undefined;
+          if (stale !== undefined) {
+            console.warn(`[directory] org ${orgId}: rejected group observation for ${stale}; a newer one is stored`);
+            return false;
+          }
           const writeIds = listedIds.filter((groupId) => !protectedIds.has(groupId));
           const writeRosterIds = rosterIds.filter((groupId) => !protectedIds.has(groupId));
           const writeRows = rows.filter((member) => !protectedIds.has(member.groupId));

@@ -571,7 +571,11 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
         if (deps.enabled && !(await deps.enabled(binding.request.actor.id)))
           throw new Error("persistent subagents are not enabled for this user");
         const current = await deps.sessions.get(binding.session.id);
-        if (!current || current.scopeId !== binding.scopeId)
+        if (
+          !current ||
+          current.scopeId !== binding.scopeId ||
+          (deps.authorize && !(await deps.authorize(current, binding.request.actor.id)))
+        )
           throw new Error("the sender no longer has access to this session");
         const request: OrchestratorInput = {
           ...binding.request,

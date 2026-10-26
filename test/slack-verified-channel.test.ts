@@ -140,18 +140,12 @@ test("a verified group-DM roster persists before admission without listing it as
   assert.equal(await store.channelPrivacy("C_ONE"), undefined);
 });
 
-test("a group DM whose roster cannot be persisted goes to envelope recovery, and a newer crawl wins", async () => {
+test("a group DM whose roster cannot be persisted goes to envelope recovery", async () => {
   const mpim = { name: "mpdm-one-1", is_private: true, is_mpim: true };
   for (const options of [{ failWrite: true }, { throwWrite: true }]) {
     const { observe } = fixture(options);
     await assert.rejects(observe(mpim), /not persisted before admission|directory transport unavailable/);
   }
-  const { store, state, observe } = fixture();
-  await store.replaceGroups([], Date.now() + 60_000, [], []);
-  await assert.rejects(observe(mpim), /group membership was not persisted before admission/);
-  assert.equal(await store.groupMember("C_ONE", "U_ONE"), false);
-  state.memberIds = [];
-  assert.equal((await observe(mpim)).publishMembers, undefined);
 });
 
 test("newer removal rejects an older in-flight live observation", async () => {

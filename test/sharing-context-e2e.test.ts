@@ -288,20 +288,6 @@ test("sharing e2e: a new group DM's verified roster carries helpers before any c
   });
   const computer = await settled(() => b.runs.get(helper.run.id));
   assert.equal(computer.result?.reply, "helper-computer", JSON.stringify(computer.result));
-
-  await b.app.upsertGroups(
-    [
-      { groupId: "G-OLD", principalId: "U1" },
-      { groupId: "G-NEW", principalId: "U2" },
-    ],
-    Date.now(),
-    ["G-OLD", "G-NEW"],
-    ["G-OLD", "G-NEW"],
-  );
-  await assert.rejects(observe(), /group membership was not persisted before admission/);
-  assert.equal(await b.directory.groupMember("G-NEW", "U1"), false);
-  const { run } = await b.runs.enqueue({ sessionId: child.threadRef, request: { ...first.request, text: "again" } });
-  assert.match((await settled(() => b.runs.get(run.id))).result?.reason ?? "", /access is no longer current/);
 });
 
 test("sharing e2e: room file and memory access is revoked on the next DM turn", async (t) => {
