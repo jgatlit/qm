@@ -619,21 +619,35 @@ export function createDirectory(deps: {
     } catch {
       return { audience: [actor, externalMarker()] };
     }
-    if (CORE_SINGLETON && !deps.externalAccess && !actor.isBot && !info?.is_mpim) {
-      if (!info?.name || typeof info.is_private !== "boolean" || info.is_member === false || observedAt === undefined)
+    if (CORE_SINGLETON && !deps.externalAccess && !actor.isBot) {
+      const group = info?.is_mpim === true;
+      if (
+        (!group && (!info?.name || typeof info.is_private !== "boolean")) ||
+        info?.is_member === false ||
+        observedAt === undefined
+      )
         return { audience: [actor, externalMarker()] };
       if (membership.publishMembers) {
-        const applied = await core.pushDirectory({
-          channels: [{ channelId: channel, name: info.name, isPrivate: info.is_private }],
-          channelMembers: membership.publishMembers.map((member) => ({
-            channelId: channel,
-            principalId: member.externalId,
-          })),
-          channelRosterIds: [channel],
-          channelsSyncedAt: observedAt,
-          partialChannels: true,
-        });
-        if (!applied) throw new Error("Slack channel membership was not persisted before admission");
+        const principalIds = membership.publishMembers.map((member) => member.externalId);
+        const applied = await core.pushDirectory(
+          group
+            ? {
+                groupIds: [channel],
+                groupMembers: principalIds.map((principalId) => ({ groupId: channel, principalId })),
+                groupRosterIds: [channel],
+                groupsSyncedAt: observedAt,
+                partialGroups: true,
+              }
+            : {
+                channels: [{ channelId: channel, name: info!.name!, isPrivate: info!.is_private }],
+                channelMembers: principalIds.map((principalId) => ({ channelId: channel, principalId })),
+                channelRosterIds: [channel],
+                channelsSyncedAt: observedAt,
+                partialChannels: true,
+              },
+        );
+        if (!applied)
+          throw new Error(`Slack ${group ? "group" : "channel"} membership was not persisted before admission`);
       }
     }
     return membership;

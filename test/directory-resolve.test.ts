@@ -157,6 +157,42 @@ describe("GET /v1/directory/resolve (agent looks up a teammate's mention id)", a
     ])
       assert.equal((await post(invalid)).status, 400);
   });
+  it("source pushes persist one observed group DM and reject malformed or stale partial writes unchanged", async () => {
+    const post = (body: object) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${base}/v1/directory`, {
+        method: "POST",
+        headers: {
+          ...signedRequestHeaders(SECRET, "POST", "/v1/directory", raw),
+          "content-type": "application/json",
+        },
+        body: raw,
+      });
+    };
+    await built.app.upsertGroups([{ groupId: "G_OTHER", principalId: "U1" }], 10, ["G_OTHER"], ["G_OTHER"]);
+    const body = {
+      groupIds: ["G_LIVE"],
+      groupMembers: [{ groupId: "G_LIVE", principalId: "U1" }],
+      groupRosterIds: ["G_LIVE"],
+      groupsSyncedAt: 30,
+      partialGroups: true,
+    };
+    const changed = { ...body, groupIds: ["G_BAD"], groupMembers: [{ groupId: "G_BAD", principalId: "U2" }] };
+    for (const invalid of [
+      { ...changed, groupsSyncedAt: undefined },
+      { ...changed, groupIds: undefined },
+      { ...changed, groupMembers: undefined },
+      { ...changed, partialGroups: "true" },
+    ])
+      assert.equal((await post(invalid)).status, 400);
+    assert.equal(await built.directory.groupMember("G_OTHER", "U1"), true);
+    assert.equal(await built.directory.groupMembership("G_BAD", "U2"), false);
+    assert.equal((await post(body)).status, 200);
+    assert.equal(await built.directory.groupMember("G_OTHER", "U1"), true);
+    assert.equal(await built.directory.groupMember("G_LIVE", "U1"), true);
+    assert.equal((await post({ ...changed, groupsSyncedAt: 5 })).status, 409);
+    assert.equal(await built.directory.groupMembership("G_BAD", "U2"), false);
+  });
 });
 
 describe("a deployment without the Slack surface (the directory store is never populated)", async () => {

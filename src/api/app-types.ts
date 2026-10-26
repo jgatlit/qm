@@ -529,6 +529,7 @@ export interface App {
     syncedAt?: number,
     groupIds?: string[],
     groupRosterIds?: string[],
+    partial?: boolean,
   ): Promise<boolean>;
   setDirectoryWorkspaceUrl(url: string): Promise<void>;
   directoryMeta(): Promise<DirectoryMeta>;

@@ -51,6 +51,7 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
     channelsSyncedAt?: unknown;
     partialChannels?: unknown;
     groupsSyncedAt?: unknown;
+    partialGroups?: unknown;
   };
   if (!Array.isArray(b.members) && !Array.isArray(b.channels) && !Array.isArray(b.groupMembers)) {
     return sendJson(res, 400, {
@@ -69,6 +70,17 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
     return sendJson(res, 400, {
       error: "bad_request",
       message: "partial channels require channels[], channelMembers[] and channelsSyncedAt",
+    });
+  }
+  if (
+    b.partialGroups !== undefined &&
+    (typeof b.partialGroups !== "boolean" ||
+      (b.partialGroups &&
+        (!Array.isArray(b.groupIds) || !Array.isArray(b.groupMembers) || numOrUndef(b.groupsSyncedAt) === undefined)))
+  ) {
+    return sendJson(res, 400, {
+      error: "bad_request",
+      message: "partial groups require groupIds[], groupMembers[] and groupsSyncedAt",
     });
   }
   if (Array.isArray(b.members) && b.members.some((m) => isObj(m) && !isPrincipalType(m.type))) {
@@ -141,7 +153,14 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
     const groupRosterIds = Array.isArray(b.groupRosterIds)
       ? b.groupRosterIds.filter((groupId): groupId is string => typeof groupId === "string")
       : undefined;
-    await app.upsertGroups(groupMembers, numOrUndef(b.groupsSyncedAt), groupIds, groupRosterIds);
+    const applied = await app.upsertGroups(
+      groupMembers,
+      numOrUndef(b.groupsSyncedAt),
+      groupIds,
+      groupRosterIds,
+      b.partialGroups === true,
+    );
+    if (b.partialGroups && !applied) return sendJson(res, 409, { error: "stale_directory_observation" });
     groupMemberCount = groupMembers.length;
   }
   return sendJson(res, 200, {

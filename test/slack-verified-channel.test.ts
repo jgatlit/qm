@@ -38,6 +38,14 @@ function fixture(options: { secondary?: boolean; failWrite?: boolean; throwWrite
         state.writes++;
         if (options.throwWrite) throw new Error("directory transport unavailable");
         if (options.failWrite) return false;
+        if (body.partialGroups)
+          return store.replaceGroups(
+            body.groupMembers!,
+            body.groupsSyncedAt,
+            body.groupIds,
+            body.groupRosterIds,
+            body.partialGroups,
+          );
         return store.replaceChannels(
           body.channels!,
           body.channelMembers,
@@ -114,10 +122,36 @@ test("unknown, external and group metadata never publish an ordinary channel", a
     { name: "room", is_private: true, is_ext_shared: true },
     { name: "room", is_private: true, is_mpim: true },
   ]) {
-    const { state, observe } = fixture();
+    const { store, observe } = fixture();
     await observe(info);
-    assert.equal(state.writes, 0);
+    assert.equal(await store.channelPrivacy("C_ONE"), undefined);
   }
+});
+
+test("a verified group-DM roster persists before admission without listing it as a channel or touching another group", async () => {
+  const { store, state, observe } = fixture();
+  state.memberIds = ["U_ONE", "U_TWO"];
+  await store.replaceGroups([{ groupId: "G_OTHER", principalId: "U_ONE" }], 1, ["G_OTHER"], ["G_OTHER"]);
+  assert.equal(await store.groupMembership("C_ONE", "U_ONE"), false);
+  assert.ok((await observe({ name: "mpdm-one--two-1", is_private: true, is_mpim: true })).publishMembers);
+  assert.equal(await store.groupMember("C_ONE", "U_ONE"), true);
+  assert.equal(await store.groupMember("C_ONE", "U_TWO"), true);
+  assert.equal(await store.groupMember("G_OTHER", "U_ONE"), true);
+  assert.equal(await store.channelPrivacy("C_ONE"), undefined);
+});
+
+test("a group DM whose roster cannot be persisted goes to envelope recovery, and a newer crawl wins", async () => {
+  const mpim = { name: "mpdm-one-1", is_private: true, is_mpim: true };
+  for (const options of [{ failWrite: true }, { throwWrite: true }]) {
+    const { observe } = fixture(options);
+    await assert.rejects(observe(mpim), /not persisted before admission|directory transport unavailable/);
+  }
+  const { store, state, observe } = fixture();
+  await store.replaceGroups([], Date.now() + 60_000, [], []);
+  await assert.rejects(observe(mpim), /group membership was not persisted before admission/);
+  assert.equal(await store.groupMember("C_ONE", "U_ONE"), false);
+  state.memberIds = [];
+  assert.equal((await observe(mpim)).publishMembers, undefined);
 });
 
 test("newer removal rejects an older in-flight live observation", async () => {

@@ -465,8 +465,8 @@ export function createMessagingMethods(
       await h.syncLinkedProjectRosters();
       return applied;
     },
-    async upsertGroups(groupMembers, syncedAt, groupIds, groupRosterIds) {
-      return deps.directory.replaceGroups(groupMembers, syncedAt, groupIds, groupRosterIds);
+    async upsertGroups(groupMembers, syncedAt, groupIds, groupRosterIds, partial) {
+      return deps.directory.replaceGroups(groupMembers, syncedAt, groupIds, groupRosterIds, partial);
     },
     async setDirectoryWorkspaceUrl(url) {
       await deps.directory.setWorkspaceUrl(url);

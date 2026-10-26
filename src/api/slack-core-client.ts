@@ -77,6 +77,7 @@ interface DirectoryPush {
   channelsSyncedAt?: number;
   partialChannels?: boolean;
   groupsSyncedAt?: number;
+  partialGroups?: boolean;
 }
 
 export interface SlackCoreClient {
@@ -437,9 +438,14 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       }
       if (body.groupMembers) {
         applied =
-          (await deps.app.upsertGroups(body.groupMembers, body.groupsSyncedAt, body.groupIds, body.groupRosterIds)) &&
-          applied;
-      }
+          (await deps.app.upsertGroups(
+            body.groupMembers,
+            body.groupsSyncedAt,
+            body.groupIds,
+            body.groupRosterIds,
+            body.partialGroups,
+          )) && applied;
+      } else if (body.partialGroups) applied = false;
       return applied;
     },
 

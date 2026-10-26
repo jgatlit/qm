@@ -377,6 +377,9 @@ const internalUser = (id: string, name: string) => ({
   profile: { display_name: name, real_name: name, email: `${name.toLowerCase()}@example.com` },
 });
 
+const crawls = (core: { directories: any[] }) =>
+  core.directories.filter((d: any) => !d.partialGroups && !d.partialChannels);
+
 async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
@@ -1314,6 +1317,10 @@ test("a group-DM thread-follow runs unprompted yet attests its author's liveness
     assert.equal(f.core.turns[0].liveActor, true, "a member's own verbatim follow-up is a live act");
     assert.equal(f.core.turns[0].conversation.kind, "group");
     assert.equal(f.core.turns[0].conversation.threadRef, "grp:G1:300.1");
+    const live = f.core.directories.find((d: any) => d.partialGroups);
+    assert.deepEqual(live?.groupIds, ["G1"], "the verified roster is persisted before admission");
+    assert.deepEqual(live.groupMembers.map((g: any) => g.principalId).sort(), ["U1", "U2"]);
+    assert.ok(live.groupsSyncedAt > 0);
   } finally {
     await f.stop();
   }
@@ -1327,9 +1334,9 @@ test("a message from an unseen group DM resyncs the directory so it becomes addr
     const listedBefore = f.client.groupListings;
     await f.app.emitMessage({ channel: "G9", channel_type: "mpim", user: "U1", text: "hi", ts: "400.1" });
     await waitFor(() => f.client.groupListings > listedBefore);
-    await waitFor(() => (f.core.directories.at(-1)?.groupMembers ?? []).some((g: any) => g.groupId === "G9"));
+    await waitFor(() => (crawls(f.core).at(-1)?.groupMembers ?? []).some((g: any) => g.groupId === "G9"));
     assert.deepEqual(
-      f.core.directories
+      crawls(f.core)
         .at(-1)
         .groupMembers.filter((g: any) => g.groupId === "G9")
         .map((g: any) => g.principalId)
@@ -1353,10 +1360,8 @@ test("a failed group listing pushes its fallback rows under the OLD stamp, never
     f.client.channelsById.set("G7", { id: "G7", name: "", is_member: true, is_private: true, is_mpim: true });
     f.client.membersByChannel.set("G7", ["U1", "U2", "UBOT"]);
     await f.app.emitMessage({ channel: "G7", channel_type: "mpim", user: "U1", text: "hi", ts: "402.1" });
-    await waitFor(() =>
-      f.core.directories.some((d: any) => (d.groupMembers ?? []).some((g: any) => g.groupId === "G7")),
-    );
-    const goodStamp = f.core.directories.findLast((d: any) => d.groupsSyncedAt !== undefined).groupsSyncedAt;
+    await waitFor(() => crawls(f.core).some((d: any) => (d.groupMembers ?? []).some((g: any) => g.groupId === "G7")));
+    const goodStamp = crawls(f.core).findLast((d: any) => d.groupsSyncedAt !== undefined).groupsSyncedAt;
     assert.ok(goodStamp > 0);
 
     f.client.failGroupListing = true;
@@ -1380,15 +1385,13 @@ test("a failed group member read marks only that roster unknown", async () => {
     f.client.channelsById.set("G5", { id: "G5", name: "", is_member: true, is_private: true, is_mpim: true });
     f.client.membersByChannel.set("G5", ["U1", "U2", "UBOT"]);
     await f.app.emitMessage({ channel: "G5", channel_type: "mpim", user: "U1", text: "hi", ts: "403.1" });
-    await waitFor(() =>
-      f.core.directories.some((d: any) => (d.groupMembers ?? []).some((g: any) => g.groupId === "G5")),
-    );
-    const good = f.core.directories.findLast((d: any) => d.groupsSyncedAt !== undefined);
+    await waitFor(() => crawls(f.core).some((d: any) => (d.groupMembers ?? []).some((g: any) => g.groupId === "G5")));
+    const good = crawls(f.core).findLast((d: any) => d.groupsSyncedAt !== undefined);
     f.client.membershipFailures.add("G5");
-    const pushes = f.core.directories.length;
+    const pushes = crawls(f.core).length;
     await f.app.emitMessage({ channel: "G5", channel_type: "mpim", subtype: "group_join", ts: "403.2" });
-    await waitFor(() => f.core.directories.length > pushes);
-    const last = f.core.directories.at(-1);
+    await waitFor(() => crawls(f.core).length > pushes);
+    const last = crawls(f.core).at(-1);
     assert.ok(last.groupsSyncedAt > good.groupsSyncedAt);
     assert.ok(last.groupIds.includes("G5"));
     assert.ok(!last.groupRosterIds.includes("G5"));
