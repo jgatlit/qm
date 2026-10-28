@@ -441,7 +441,7 @@ import {
 } from "./deployment/deployment-layer-store.ts";
 import { createPostgresErrorLog } from "./admin/postgres-error-log.ts";
 import { errMessage, reportFailureAs, swallowAs } from "./util/errors.ts";
-import { sleep, withTimeout } from "./util/async.ts";
+import { createKeyedQueue, sleep, withTimeout } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
 
 export interface Runtime {
@@ -1413,7 +1413,9 @@ export function buildApp(
     setCustomProviders(await customProviders.enabled());
   };
   let refreshedModels: { versions: string; routes: unknown } | undefined;
-  const refreshModels = async () => {
+  const modelRefreshes = createKeyedQueue();
+  const refreshModels = () => modelRefreshes("models", refreshModelsNow);
+  const refreshModelsNow = async () => {
     await gatewayCatalog?.refresh();
     const versions = (await Promise.all(modelInputs.map((map) => map.version()))).join(":");
     const routes = gatewayTransport?.models;

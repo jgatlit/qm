@@ -97,3 +97,60 @@ test("an ambient message whose reply detection fails stays silent and leaves the
   const silent = (await auditLog.events()).find((e) => e.action === "turn.silent");
   assert.equal(silent?.detail, "detection failed: 401 invalid x-api-key");
 });
+
+test("an ambient message the agent stays out of never searches memory", async () => {
+  const base = createMockHarness();
+  const harness: Harness = {
+    ...base,
+    models: { ...base.models, shouldRespond: async () => ({ respond: false, reason: "not addressed" }) },
+  };
+  const config = createMemoryConfigStore("default-org");
+  const acl = createAclStore();
+  const auditLog = createAuditLog();
+  const workspace = createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "rdf-")));
+  const memory = createMemoryService(workspace);
+  await memory.capture("channel:C1", ["the deploy pipeline runs on Tuesdays"], Date.now());
+  let recalls = 0;
+  const recall = memory.recall.bind(memory);
+  memory.recall = async (scope, context) => {
+    recalls++;
+    return recall(scope, context);
+  };
+  const orch = createOrchestrator({
+    ...singleProcessDeps(),
+    identity: createIdentityService(),
+    resolution: createResolutionService("default-org", config, acl),
+    sessions: createMemorySessionStore(),
+    workspace,
+    files: createMemoryFileArtifactStore(createMemoryDurableByteStore()),
+    sandbox: {
+      profile: { backend: "fake", writablePersistence: "snapshot_to_workspace", processSessions: false },
+    } as Sandbox,
+    modelGateway: createModelGateway(),
+    auditLog,
+    rateLimiter: createRateLimiter({ maxPerWindow: 1000, windowMs: 60_000 }),
+    harness,
+    memory,
+    deploy: createDeployService({
+      ...singleProcessDeps(),
+      deployStore: createDeployStore(),
+      provider: createDockerDeployProvider(),
+      deployDir: join(tmpdir(), "rdf-deploy"),
+      auditLog,
+      acl,
+    }),
+    acl,
+  });
+
+  const result = await orch.handleTurn({
+    surface: "slack",
+    actor,
+    conversation: { kind: "channel", threadRef: "ch:C1:300.1", channelRef: "C1", audience: [actor] } as Conversation,
+    origin: { kind: "ambient" },
+    text: "is the deploy pipeline running today?",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  assert.equal(result.status, "silent");
+  assert.equal(recalls, 0);
+});

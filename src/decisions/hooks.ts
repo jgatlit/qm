@@ -1,5 +1,6 @@
 import type { AuditLog } from "../audit/audit-log.ts";
 import {
+  classifierKey,
   runHook,
   type DecisionBackend,
   type DecisionHook,
@@ -69,16 +70,15 @@ export function createDecisionHooks(store: DecisionStore | undefined, backend: D
   };
   return async (hook: DecisionHook, state: string, turn: DecisionTurn) => {
     const rules = (await store?.rules(hook)) ?? [];
-    const model = (rule: DecisionRule) => JSON.stringify([rule.model.provider, rule.model.model]);
-    const enforced = new Set(rules.filter((rule) => rule.mode === "enforce").map(model));
+    const enforced = new Set(rules.filter((rule) => rule.mode === "enforce").map(classifierKey));
     void run(
-      rules.filter((rule) => !enforced.has(model(rule))),
+      rules.filter((rule) => !enforced.has(classifierKey(rule))),
       hook,
       state,
-      turn,
+      { ...turn, cancel: undefined },
     ).catch(swallowAs("decisions: observe-only rules", undefined));
     return run(
-      rules.filter((rule) => enforced.has(model(rule))),
+      rules.filter((rule) => enforced.has(classifierKey(rule))),
       hook,
       state,
       turn,

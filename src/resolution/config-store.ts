@@ -4,7 +4,7 @@ import { defaultOrgPolicy } from "../policy/command-policy.ts";
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { DurableMap } from "../persistence/durable-map.ts";
-import { createMemoryMap } from "../persistence/durable-map.ts";
+import { createMemoryMap, VERSIONED_CACHE_MAX_AGE_MS } from "../persistence/durable-map.ts";
 import { createKeyedQueue } from "../util/async.ts";
 import { isHarnessId, modelSupportedByHarness } from "../model/pi-models.ts";
 import { composeSecurityPosture, type SecurityPosture } from "../security/security-posture.ts";
@@ -290,12 +290,16 @@ export function createMemoryConfigStore(
       apply();
     });
   const freshnessResets: Array<() => void> = [];
+  const resetFreshness = () => {
+    for (const reset of freshnessResets) reset();
+  };
   const freshFrom = (
     store: Pick<DurableMap<unknown>, "version">,
     key: string,
     load: (id: ScopeId) => Promise<void>,
   ) => {
     let seen: string | undefined;
+    let seenAt = 0;
     const current = new Set<ScopeId>();
     freshnessResets.push(() => {
       seen = undefined;
@@ -303,8 +307,9 @@ export function createMemoryConfigStore(
     });
     return async (ids: readonly ScopeId[]): Promise<void> => {
       const version = await store.version();
-      if (version !== seen) {
+      if (version !== seen || Date.now() - seenAt > VERSIONED_CACHE_MAX_AGE_MS) {
         seen = version;
+        seenAt = Date.now();
         current.clear();
       }
       await Promise.all(
@@ -493,11 +498,7 @@ export function createMemoryConfigStore(
   };
   souls.set(org, defaultOrgSoul);
 
-  const freshSouls = freshFrom(soulStore, "soul", async (id) => {
-    const soul = await soulStore.get(id);
-    if (soul) souls.set(id, { content: soul.content, version: soul.version });
-    else if (id !== org) souls.delete(id);
-  });
+  const freshSouls = freshFrom(soulStore, "soul", async (id) => loadSoulCache(id, await soulStore.get(id)));
   const freshBaseModels = freshFrom(baseModelStore, "model", async (id) => {
     cacheBaseModel(id, await baseModelStore.get(id));
   });
@@ -587,7 +588,7 @@ export function createMemoryConfigStore(
           for (const revisions of soulHistory.values()) revisions.sort((a, b) => b.version - a.version);
           for (const r of await baseModelStore.all()) baseModels.set(r.scopeId, r);
           await Promise.all(allSettings.map((setting) => setting.hydrate()));
-          for (const reset of freshnessResets) reset();
+          resetFreshness();
         })();
       }
       return hydrated;
@@ -696,6 +697,7 @@ export function createMemoryConfigStore(
     },
     restoreSoulCacheSnapshot(id, snapshot) {
       loadSoulCache(id, cloneSoul(snapshot));
+      resetFreshness();
     },
     getCommandPolicy: (id) => settings.commandPolicies.get(id) ?? (id === org ? orgDefaultPolicy : null),
     setCommandPolicy: (id, policy) => settings.commandPolicies.set(id, policy),

@@ -194,6 +194,7 @@ export function createMemoryMap<T>(): DurableMap<T> {
 }
 
 const VERSIONS_TABLE = "durable_map_versions";
+export const VERSIONED_CACHE_MAX_AGE_MS = 15_000;
 
 const pendingVersionReads = new WeakMap<PgPool, Map<string, PromiseWithResolvers<string>>>();
 
@@ -295,7 +296,6 @@ export function createPostgresMap<T>(
       return fn(client);
     });
   }
-  const CACHE_MAX_AGE_MS = 15_000;
   let cache: { v: string; fetchedAt: number; entries: Array<[string, T]> } | null = null;
   async function version(): Promise<string> {
     await ready();
@@ -303,7 +303,7 @@ export function createPostgresMap<T>(
   }
   async function snapshot(): Promise<Array<[string, T]>> {
     const v = await version();
-    if (!cache || cache.v !== v || Date.now() - cache.fetchedAt > CACHE_MAX_AGE_MS) {
+    if (!cache || cache.v !== v || Date.now() - cache.fetchedAt > VERSIONED_CACHE_MAX_AGE_MS) {
       const rows = await pg.q(`SELECT id, json FROM ${table} ORDER BY id`);
       cache = { v, fetchedAt: Date.now(), entries: rows.map((row) => [row.id as string, row.json as T]) };
     }

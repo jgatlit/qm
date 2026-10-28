@@ -4,8 +4,13 @@ import { createMemoryConfigStore } from "../src/resolution/config-store.ts";
 import { composeSoul, createResolutionService } from "../src/resolution/resolution-service.ts";
 import { createAclStore } from "../src/acl/acl-store.ts";
 import { scopeId, type Conversation, type Principal } from "../src/types.ts";
-import { createMemoryMap, type DurableMap } from "../src/persistence/durable-map.ts";
-import type { ConfigStoreMaps, PersistedEgressPolicy, PersistedSoul } from "../src/resolution/config-store.ts";
+import { createMemoryMap, VERSIONED_CACHE_MAX_AGE_MS, type DurableMap } from "../src/persistence/durable-map.ts";
+import type {
+  ConfigStoreMaps,
+  PersistedEgressPolicy,
+  PersistedSecurityPosture,
+  PersistedSoul,
+} from "../src/resolution/config-store.ts";
 
 const actor: Principal = { id: "U1", type: "internal" };
 
@@ -199,4 +204,17 @@ test("external audiences receive no organization or scope policy", async () => {
   const resolution = createResolutionService("default-org", config, createAclStore());
   const conversation: Conversation = { kind: "channel", channelRef: "C1", threadRef: "C1:t", audience: [actor] };
   assert.equal((await resolution.resolve(conversation, actor, true)).systemPrompt, "");
+});
+
+test("a configuration row changed without a version bump is reread within the cache age", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const backing = createMemoryMap<PersistedSecurityPosture>();
+  const unversioned: DurableMap<PersistedSecurityPosture> = { ...backing, version: async () => "fixed" };
+  const reader = createMemoryConfigStore("default-org", { securityPostures: unversioned });
+  const personal = scopeId("personal", "U1");
+  assert.equal(await reader.getSecurityPostureDurable(personal), "auto");
+  await backing.put(personal, { scopeId: personal, posture: "strict" });
+  assert.equal(await reader.getSecurityPostureDurable(personal), "auto");
+  t.mock.timers.tick(VERSIONED_CACHE_MAX_AGE_MS + 1);
+  assert.equal(await reader.getSecurityPostureDurable(personal), "strict");
 });

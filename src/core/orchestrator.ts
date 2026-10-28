@@ -1482,16 +1482,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         commandCredentials.push(placeCredential(credential));
         credentialDescriptions.push({ handle: credential.handle, ownerId, description, credentialId });
       };
-      const turnScopeGrants =
-        !external && !strictReadOnly && deps.keychain ? deps.keychain.grantsForScope(scopeId) : undefined;
-      turnScopeGrants?.catch(() => undefined);
-      const registerKeychainCredentials = async (
-        addCredential: typeof addCredentialToCatalog,
-        scopeGrants = () => deps.keychain!.grantsForScope(scopeId),
-      ): Promise<void> => {
+      const registerKeychainCredentials = async (addCredential: typeof addCredentialToCatalog): Promise<void> => {
         if (external || strictReadOnly || !deps.keychain) return;
         const keychain = deps.keychain;
-        for (const { grant, credential } of await scopeGrants()) {
+        for (const { grant, credential } of await keychain.grantsForScope(scopeId)) {
           if (credential.kind === "broker" || isBackendCredential(credential)) continue;
           addCredential(
             {
@@ -1532,7 +1526,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           }
         }
       };
-      await registerKeychainCredentials(addCredentialToCatalog, () => turnScopeGrants!);
+      await registerKeychainCredentials(addCredentialToCatalog);
       const registerConnectorCredentials = async (addCredential: typeof addCredentialToCatalog): Promise<void> => {
         if (!external && !strictReadOnly && deps.connectorTokens && ownCredentialsAllowed) {
           const tokens = deps.connectorTokens;
@@ -2010,10 +2004,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           deps.sessions.getContextWindow(session.id),
           context.memorySnapshot(),
         ]);
-        const earlyRecallQuery = memoryRecallQuery(input.text, filterHistory(forModelContext(memoryWindow.entries)));
-        const earlyRecall = context.recallMemory(earlyRecallQuery, memoryView.loaded);
-        earlyRecall.catch(() => undefined);
         let historyAppended = input.approval !== undefined;
+        const decidesWhetherToReply = ambientTurn && !sessionTurn && !!deps.harness.models.shouldRespond;
+        const earlyRecallQuery = memoryRecallQuery(input.text, filterHistory(forModelContext(memoryWindow.entries)));
+        const earlyRecall =
+          historyAppended || decidesWhetherToReply
+            ? undefined
+            : context.recallMemory(earlyRecallQuery, memoryView.loaded);
+        earlyRecall?.catch(swallowAs("orchestrator: memory recall", undefined));
         const captureDependencies = () => [
           ...memoryView.facts,
           ...(!memoryView.complete ||
@@ -2327,7 +2325,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           const [entriesByOwner, connectorsByOwner, scopeGrants, scopeAsks] = await Promise.all([
             !external ? (deps.keychain?.listByOwners(members.map((m) => m.id)) ?? new Map()) : new Map(),
             !external ? (deps.keychain?.listConnectorsByOwners(members.map((m) => m.id)) ?? new Map()) : new Map(),
-            !external ? (turnScopeGrants ?? deps.keychain?.grantsForScope(scopeId) ?? []) : [],
+            !external ? (deps.keychain?.grantsForScope(scopeId) ?? []) : [],
             !external ? (deps.keychain?.listAsks({ requesterScopeId: scopeId }) ?? []) : [],
           ]);
           const keychainBlock = renderKeychainManifest({
@@ -2823,6 +2821,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             .forRender(session.id)
             .then((read) => selectOverheardToImport(input.overheard!, recordedMessageTimestamps(read.entries)))
             .catch(swallowAs("orchestrator: overheard catch-up import", [] as OverheardEntryPayload[]));
+          historyAppended ||= toImport.length > 0;
           let importedEntries: SessionEntry[] = [];
           try {
             importedEntries = await withManagedRosterVersion(() =>
@@ -2835,10 +2834,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             if (e instanceof ProjectRosterChanged) throw e;
             swallow("orchestrator: overheard catch-up import", e);
           }
-          if (importedEntries.length) {
-            importedOverheard.push(...toImport);
-            historyAppended = true;
-          }
+          if (importedEntries.length) importedOverheard.push(...toImport);
         }
 
         const rawEntries = (await turnWindow()).entries;
@@ -2846,8 +2842,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         let visibleHistory = filterHistory(forModelContext(rawEntries));
         const recallQuery = memoryRecallQuery(input.text, visibleHistory);
         const recalled =
-          recallQuery === earlyRecallQuery ? earlyRecall : context.recallMemory(recallQuery, memoryView.loaded);
-        recalled.catch(() => undefined);
+          earlyRecall && recallQuery === earlyRecallQuery
+            ? earlyRecall
+            : context.recallMemory(recallQuery, memoryView.loaded);
+        if (recalled !== earlyRecall) recalled.catch(swallowAs("orchestrator: memory recall", undefined));
         const partial = isRetry ? (recordedTurn ?? findTrailingPartialTurn(visibleHistory, input.runId)) : null;
         let resumePlan = partial ? resumeStrategy(visibleHistory, partial) : null;
         if (partial && resumePlan?.kind === "settle") {
