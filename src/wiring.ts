@@ -75,6 +75,7 @@ import {
   type ModelOverlayStore,
   type StoredModelOverlay,
 } from "./model/model-overlay-store.ts";
+import { createModelRefresh } from "./model/model-refresh.ts";
 import { mkdirSync } from "node:fs";
 import type { StagedEnvelope } from "./slack/envelope-staging.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -1408,37 +1409,18 @@ export function buildApp(
   });
   const modelRegistryBacking = artifactMap<StoredModelOverlay>("model_registry");
   const modelRegistry = createModelOverlayStore(modelRegistryBacking, writeModelRegistry, modelVerifier);
-  const modelInputs = [customProviderBacking, modelRegistryBacking, modelCredentialBacking];
   const refreshCustomProviders = async () => {
     setCustomProviders(await customProviders.enabled());
   };
-  let refreshedModels: { versions: string; routes: unknown } | undefined;
-  let modelRefresh: Promise<void> | undefined;
-  let nextModelRefresh: Promise<void> | undefined;
-  const refreshModels = (): Promise<void> => {
-    if (!modelRefresh) {
-      modelRefresh = refreshModelsNow().finally(() => {
-        modelRefresh = undefined;
-      });
-      return modelRefresh;
-    }
-    nextModelRefresh ??= modelRefresh
-      .catch(() => undefined)
-      .then(() => {
-        nextModelRefresh = undefined;
-        return refreshModels();
-      });
-    return nextModelRefresh;
-  };
-  const refreshModelsNow = async () => {
-    await gatewayCatalog?.refresh();
-    const versions = (await Promise.all(modelInputs.map((map) => map.version()))).join(":");
-    const routes = gatewayTransport?.models;
-    if (refreshedModels?.versions === versions && refreshedModels.routes === routes) return;
-    await refreshCustomProviders();
-    const settled = await modelRegistry.refresh();
-    refreshedModels = settled ? { versions, routes } : undefined;
-  };
+  const refreshModels = createModelRefresh({
+    inputs: [customProviderBacking, modelRegistryBacking, modelCredentialBacking],
+    refreshCatalog: async () => gatewayCatalog?.refresh(),
+    routes: () => gatewayTransport?.models,
+    rebuild: async () => {
+      await refreshCustomProviders();
+      return modelRegistry.refresh();
+    },
+  });
   const resolveMemoryEmbedder = async (id: string): Promise<MemoryEmbedder> => {
     const model = resolveEmbeddingModel(id);
     if (!model) throw new Error(`Embedding model unavailable: ${id}`);
