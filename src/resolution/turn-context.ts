@@ -76,6 +76,7 @@ export async function resolveTurnContext(input: ContextInput) {
   const memory = disclosedMemory(input.memory, disclosure);
   const handles = [...resolution.grantedHandles, ...(await carriedFileHandles(sharingSources, input.files))];
   const memoryLabels = await memoryRecallLabels(read, input.directory, input.projects);
+  const recalls = new Map<string, ReturnType<typeof recallAcrossScopes>>();
   return {
     sharingSources,
     memoryScopeId,
@@ -93,13 +94,20 @@ export async function resolveTurnContext(input: ContextInput) {
         complete: notebooks.every(({ facts }) => !!facts),
       };
     },
-    recallMemory: (query: string, disclosedFacts?: ReadonlyMap<ScopeId, readonly MemoryFact[]>) =>
-      recallAcrossScopes(
-        memory,
-        read,
-        { query, actorId: input.actor.id, maxChars: RECALL_MAX_CHARS, ...(disclosedFacts ? { disclosedFacts } : {}) },
-        memoryLabels,
-      ),
+    recallMemory: (query: string, disclosedFacts?: ReadonlyMap<ScopeId, readonly MemoryFact[]>) => {
+      let recalled = recalls.get(query);
+      if (!recalled) {
+        recalled = recallAcrossScopes(
+          memory,
+          read,
+          { query, actorId: input.actor.id, maxChars: RECALL_MAX_CHARS, ...(disclosedFacts ? { disclosedFacts } : {}) },
+          memoryLabels,
+        );
+        recalled.catch(swallowAs("context: memory recall", undefined));
+        recalls.set(query, recalled);
+      }
+      return recalled;
+    },
     searchMemory: async (query: string, limit = 20, scope?: ScopeId): Promise<string[] | null> => {
       const hits = await searchNotebooks(memory, read, query, limit, scope, input.actor.id);
       if (hits) for (const source of scope === undefined ? read : [scope]) recordRead(source, "memory");

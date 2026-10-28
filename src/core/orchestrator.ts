@@ -2005,13 +2005,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           context.memorySnapshot(),
         ]);
         let historyAppended = input.approval !== undefined;
-        const decidesWhetherToReply = ambientTurn && !sessionTurn && !!deps.harness.models.shouldRespond;
-        const earlyRecallQuery = memoryRecallQuery(input.text, filterHistory(forModelContext(memoryWindow.entries)));
-        const earlyRecall =
-          historyAppended || decidesWhetherToReply
-            ? undefined
-            : context.recallMemory(earlyRecallQuery, memoryView.loaded);
-        earlyRecall?.catch(swallowAs("orchestrator: memory recall", undefined));
+        if (!historyAppended && !(ambientTurn && !sessionTurn && deps.harness.models.shouldRespond))
+          void context.recallMemory(
+            memoryRecallQuery(input.text, filterHistory(forModelContext(memoryWindow.entries))),
+            memoryView.loaded,
+          );
         const captureDependencies = () => [
           ...memoryView.facts,
           ...(!memoryView.complete ||
@@ -2840,12 +2838,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const rawEntries = (await turnWindow()).entries;
         const priorTurns = input.priorTurns;
         let visibleHistory = filterHistory(forModelContext(rawEntries));
-        const recallQuery = memoryRecallQuery(input.text, visibleHistory);
-        const recalled =
-          earlyRecall && recallQuery === earlyRecallQuery
-            ? earlyRecall
-            : context.recallMemory(recallQuery, memoryView.loaded);
-        if (recalled !== earlyRecall) recalled.catch(swallowAs("orchestrator: memory recall", undefined));
+        const recalled = context.recallMemory(memoryRecallQuery(input.text, visibleHistory), memoryView.loaded);
         const partial = isRetry ? (recordedTurn ?? findTrailingPartialTurn(visibleHistory, input.runId)) : null;
         let resumePlan = partial ? resumeStrategy(visibleHistory, partial) : null;
         if (partial && resumePlan?.kind === "settle") {

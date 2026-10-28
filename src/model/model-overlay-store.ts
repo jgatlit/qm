@@ -1,3 +1,4 @@
+import { swallow } from "../util/errors.ts";
 import { randomUUID } from "node:crypto";
 import { ModelVerificationError, verificationFailure, type ModelVerifier } from "./model-verification.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
@@ -27,7 +28,8 @@ export function createModelOverlayStore(
         reason: "Model settings or serving credentials changed; verify and enable this model again.",
         settled: true,
       };
-    } catch {
+    } catch (error) {
+      swallow(`model verification: ${id}`, error);
       return {
         reason: "Model verification is no longer valid; check serving credentials and verify again.",
         settled: false,
