@@ -68,6 +68,12 @@ export interface ClaudeHarnessOptions extends HarnessToolPlumbing {
   env?: NodeJS.ProcessEnv;
   turnWallClockMs?: number;
   /**
+   * Quiet period after the last background task settles on a CLI that never reports
+   * `session_state_changed`. The parent normally starts a follow-up turn to read the
+   * children's results; this bounds the wait when it does not. Default 120s.
+   */
+  backgroundSettleGraceMs?: number;
+  /**
    * Custodian of subscription auth (e.g. a keychain-held CLAUDE_CODE_OAUTH_TOKEN).
    * Resolved fresh per session start; merged over static env so the secret
    * never lives in process env or on the core host's disk.
@@ -422,6 +428,19 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
     // activity and never hold the turn open.
     let backgroundTaskLevelSeen = false;
     let activeBackgroundTasks = new Set<string>();
+    // When background children finish, the CLI wakes the parent to read their results and
+    // the parent keeps calling tools through the same bridge. A settled task level is
+    // therefore not the end of the turn; `session_state_changed: idle` is (the CLI emits it
+    // only after held-back results flush and its background-agent loop exits). Older CLIs
+    // that never emit it fall back to "settled, then the parent's next result", with a quiet
+    // period so a stream that never produces one cannot hang the turn.
+    let sessionStateSeen = false;
+    let sessionIdle = false;
+    let settleGrace: NodeJS.Timeout | undefined;
+    const clearSettleGrace = () => {
+      if (settleGrace) clearTimeout(settleGrace);
+      settleGrace = undefined;
+    };
     const callUsage = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>();
     let stepCallIds = new Set<string>();
     let recordedSteps = 0;
@@ -438,6 +457,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
         abortController: controller,
         cwd: jail,
         env: {
+          CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
           ...perUserClaudeEnv(
             claudeChildEnv(authEnv ? { ...opts.env, ...authEnv } : (opts.env ?? {}), jail),
             turn.claudeOauthToken,
@@ -568,14 +588,33 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
       backgroundTaskLevelSeen
         ? activeBackgroundTasks.size === 0
         : [...taskStates.values()].every((task) => task.settled);
-    // Signal polling stays live while children run so aborts and steers still reach the turn.
-    const closeQueueIfSettled = async () => {
-      if (pendingPrompts > 0 || !backgroundTasksSettled()) return;
+    const settleGraceMs = opts.backgroundSettleGraceMs ?? 120_000;
+    const closeQueue = async () => {
+      clearSettleGrace();
       if (!signalsStopped) {
         await stopSignals?.();
         signalsStopped = true;
       }
       queue.close();
+    };
+    // Signal polling stays live while children run so aborts and steers still reach the turn.
+    // `atResult` is true only when the parent itself just produced a result; a child settling
+    // is never by itself a reason to close, because the parent is about to resume.
+    const closeQueueIfSettled = async (atResult: boolean) => {
+      if (pendingPrompts > 0) return;
+      if (sessionStateSeen) {
+        if (sessionIdle) await closeQueue();
+        return;
+      }
+      if (!backgroundTasksSettled()) return;
+      if (atResult) return closeQueue();
+      // A child settled after the parent's last result: wait for the parent's follow-up.
+      clearSettleGrace();
+      settleGrace = setTimeout(() => {
+        settleGrace = undefined;
+        if (pendingPrompts === 0 && backgroundTasksSettled() && !sessionStateSeen) void closeQueue();
+      }, settleGraceMs);
+      settleGrace.unref?.();
     };
     const recordedEnvelope = {
       system: turn.systemPrompt,
@@ -632,6 +671,13 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
       const consume = (async () => {
         for await (const message of sdkQuery) {
           if (settled || interrupted) break;
+          if (message.type !== "system") clearSettleGrace();
+          if (message.type === "system" && message.subtype === "session_state_changed") {
+            sessionStateSeen = true;
+            sessionIdle = message.state === "idle";
+            if (sessionIdle) await closeQueueIfSettled(false);
+            else clearSettleGrace();
+          }
           if (message.type === "assistant") {
             const usage = message.message.usage;
             const seen = {
@@ -707,14 +753,14 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           if (message.type === "system" && message.subtype === "background_tasks_changed") {
             backgroundTaskLevelSeen = true;
             activeBackgroundTasks = new Set(message.tasks.filter((task) => !task.ambient).map((task) => task.task_id));
-            await closeQueueIfSettled();
+            await closeQueueIfSettled(false);
           }
           if (message.type === "system" && message.subtype === "task_updated") {
             const tracked = taskStates.get(message.task_id);
             const status = message.patch.status;
             if (tracked && (status === "completed" || status === "failed" || status === "killed")) {
               tracked.settled = true;
-              await closeQueueIfSettled();
+              await closeQueueIfSettled(false);
             }
           }
           if (message.type === "system" && message.subtype === "task_notification") {
@@ -736,7 +782,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
               }
             }
           }
-          if (message.type === "system" && message.subtype === "task_notification") await closeQueueIfSettled();
+          if (message.type === "system" && message.subtype === "task_notification") await closeQueueIfSettled(false);
           thinking.push(...thinkingFromMessage(message));
           const delta = streamDelta(message);
           if (delta.textStart) turn.onTextBlockStart?.();
@@ -756,7 +802,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           }
           streamedText = "";
           pendingPrompts = Math.max(0, pendingPrompts - 1);
-          await closeQueueIfSettled();
+          await closeQueueIfSettled(true);
         }
       })();
       try {
@@ -867,6 +913,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           swallow("claude: llm request record", error);
         }
       }
+      clearSettleGrace();
       queue.close();
       if (!signalsStopped) await stopSignals?.();
       turn.cancel?.removeEventListener("abort", onCancel);
