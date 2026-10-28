@@ -35,13 +35,13 @@ export function createSideChatController(ctx: ConvCtx) {
   const anchors = new Map<HTMLElement, { session: CoreSession; range: Range }[]>();
   const observedRows = new Map<HTMLElement, HTMLElement>();
   let hovered: string | undefined;
-  const highlightResize = new ResizeObserver(() => paintHighlights());
+  const highlightResize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => paintHighlights());
   function paintHighlights() {
     for (const [host, entries] of anchors) {
       if (!host.isConnected) {
-        highlightResize.unobserve(host);
+        highlightResize?.unobserve(host);
         const row = observedRows.get(host);
-        if (row) highlightResize.unobserve(row);
+        if (row) highlightResize?.unobserve(row);
         observedRows.delete(host);
         anchors.delete(host);
         continue;
@@ -153,7 +153,7 @@ export function createSideChatController(ctx: ConvCtx) {
     if (id === sourceId) return;
     close();
     sourceId = id;
-    highlightResize.disconnect();
+    highlightResize?.disconnect();
     observedRows.clear();
     for (const host of anchors.keys())
       host.querySelectorAll(".side-chat-highlight").forEach((element) => element.remove());
@@ -166,7 +166,7 @@ export function createSideChatController(ctx: ConvCtx) {
     void api<{ sessions: CoreSession[] }>(`/api/sessions/${encodeURIComponent(id)}/side-chats`).then(
       (result) => {
         if (sourceId !== id) return;
-        chats = result.sessions;
+        chats = result.sessions ?? [];
         redraw();
       },
       (cause) => {
@@ -398,7 +398,7 @@ export function createSideChatController(ctx: ConvCtx) {
         host.querySelectorAll(".side-chat-highlight").forEach((element) => element.remove());
       anchors.clear();
       observedRows.clear();
-      highlightResize.disconnect();
+      highlightResize?.disconnect();
     },
     hover(event: MouseEvent) {
       const next = anchorAt(event)?.session.id;
@@ -423,9 +423,9 @@ export function createSideChatController(ctx: ConvCtx) {
               queueMicrotask(() => {
                 for (const key of anchors.keys()) {
                   if (key.isConnected) continue;
-                  highlightResize.unobserve(key);
+                  highlightResize?.unobserve(key);
                   const previous = observedRows.get(key);
-                  if (previous) highlightResize.unobserve(previous);
+                  if (previous) highlightResize?.unobserve(previous);
                   observedRows.delete(key);
                   anchors.delete(key);
                 }
@@ -440,10 +440,10 @@ export function createSideChatController(ctx: ConvCtx) {
                       })
                     : [],
                 );
-                highlightResize.observe(host);
+                highlightResize?.observe(host);
                 if (row) {
                   observedRows.set(host, row as HTMLElement);
-                  highlightResize.observe(row);
+                  highlightResize?.observe(row);
                 }
                 paintHighlights();
               });
