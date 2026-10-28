@@ -81,7 +81,7 @@ test("open a side chat from an earlier inherited assistant reply", async () => {
     assert.ok(discuss);
     discuss.click();
     await until(() => Boolean(forkBody));
-    assert.deepEqual(forkBody, { upToSeq: 3, sideChat: { entrySeq: 1, quote: "worker crashes" } });
+    assert.deepEqual(forkBody, { upToSeq: 3, sideChat: { entrySeq: 1, quote: "worker crashes", occurrence: 0 } });
   } finally {
     await h.close();
   }
