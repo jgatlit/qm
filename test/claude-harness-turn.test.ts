@@ -78,6 +78,47 @@ function resultMessage(text: string, overrides: Record<string, unknown> = {}): F
   };
 }
 
+function backgroundTasks(...taskIds: string[]): FakeSdkMessage {
+  return {
+    type: "system",
+    subtype: "background_tasks_changed",
+    tasks: taskIds.map((task_id) => ({ task_id, task_type: "agent", description: task_id })),
+  };
+}
+
+function taskStarted(taskId: string): FakeSdkMessage {
+  return {
+    type: "system",
+    subtype: "task_started",
+    task_id: taskId,
+    tool_use_id: `call-${taskId}`,
+    description: taskId,
+    subagent_type: "code",
+  };
+}
+
+function taskUpdated(taskId: string, status: string): FakeSdkMessage {
+  return { type: "system", subtype: "task_updated", task_id: taskId, patch: { status } };
+}
+
+function taskNotification(taskId: string, status: string): FakeSdkMessage {
+  return {
+    type: "system",
+    subtype: "task_notification",
+    task_id: taskId,
+    status,
+    output_file: "",
+    summary: `${taskId} ${status}`,
+  };
+}
+
+async function queueClosed(iterator: AsyncIterator<unknown>): Promise<boolean> {
+  return await Promise.race([
+    iterator.next().then((next) => next.done === true),
+    new Promise<boolean>((resolve) => setImmediate(() => resolve(false))),
+  ]);
+}
+
 function harnessTurn(overrides: Partial<HarnessTurnInput> = {}): {
   turn: HarnessTurnInput;
   entries: SessionEntry[];
@@ -340,6 +381,267 @@ for (const ending of ["close", "throw"]) {
     );
   });
 }
+
+test("background children retain the MCP bridge until the authoritative task level is empty", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield backgroundTasks("completed", "failed", "killed");
+    yield taskStarted("completed");
+    yield taskStarted("failed");
+    yield taskStarted("killed");
+    yield resultMessage("parent result");
+    assert.equal(await queueClosed(iterator), false);
+    const childRead = await toolHandlers.get("memory")!({ action: "read" });
+    assert.match(JSON.stringify(childRead), /bridge alive/);
+
+    yield taskUpdated("completed", "completed");
+    yield taskNotification("completed", "completed");
+    yield backgroundTasks("failed", "killed");
+    yield taskUpdated("failed", "failed");
+    yield taskNotification("failed", "failed");
+    yield backgroundTasks("killed");
+    yield taskUpdated("killed", "killed");
+    yield taskNotification("killed", "stopped");
+    yield backgroundTasks();
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn, entries } = harnessTurn({
+    readOnly: false,
+    tools: {
+      memoryRead: async () => "bridge alive",
+    } as unknown as HarnessTurnInput["tools"],
+  });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+  const agentResults = entries
+    .filter((entry) => entry.type === "tool_result")
+    .map((entry) => entry.payload as { tool: string; isError?: boolean })
+    .filter((payload) => payload.tool === "Agent");
+  assert.deepEqual(
+    agentResults.map((payload) => payload.isError),
+    [false, true, true],
+  );
+});
+
+test("an empty task level closes even when the terminal notification is missing", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield backgroundTasks("child");
+    yield taskStarted("child");
+    yield resultMessage("parent result");
+    assert.equal(await queueClosed(iterator), false);
+    yield backgroundTasks();
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn, entries } = harnessTurn({ readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+  assert.equal(
+    entries.some((entry) => entry.type === "tool_result"),
+    false,
+  );
+});
+
+test("the task level remains sufficient when both edge messages are missing", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield backgroundTasks("child");
+    yield resultMessage("parent result");
+    yield backgroundTasks();
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn } = harnessTurn({ readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+});
+
+test("a terminal notification then an empty task level closes without another root result", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield backgroundTasks("child");
+    yield taskStarted("child");
+    yield resultMessage("parent result");
+    yield taskNotification("child", "completed");
+    yield backgroundTasks();
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn, entries } = harnessTurn({ readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+  assert.equal(entries.filter((entry) => entry.type === "tool_result").length, 1);
+});
+
+test("an empty task level may precede its terminal notification", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield backgroundTasks("child");
+    yield taskStarted("child");
+    yield resultMessage("parent result");
+    yield backgroundTasks();
+    yield taskNotification("child", "completed");
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn, entries } = harnessTurn({ readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+  assert.equal(entries.filter((entry) => entry.type === "tool_result").length, 1);
+});
+
+test("task edges remain a fallback when the SDK omits the background task level", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield taskStarted("child");
+    yield resultMessage("parent result");
+    assert.equal(await queueClosed(iterator), false);
+    yield taskNotification("child", "completed");
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn } = harnessTurn({ readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+});
+
+test("a folded steer and a background child share the same guarded lifetime", { timeout: 5_000 }, async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-folded-steer-child";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield backgroundTasks("child");
+    yield taskStarted("child");
+    await signals.send(runId, { kind: "steer", text: "fold this into the parent" });
+    assert.equal((await iterator.next()).done, false);
+    yield resultMessage("parent handled both prompts");
+    assert.equal(await queueClosed(iterator), false);
+    yield backgroundTasks();
+    yield taskNotification("child", "completed");
+    yield resultMessage("child joined");
+  };
+
+  const harness = createClaudeHarness({ signals });
+  const { turn } = harnessTurn({ runId, readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "child joined");
+});
+
+test("an active background child remains bounded by cancellation and the wall clock", { timeout: 5_000 }, async (t) => {
+  await t.test("cancel", async () => {
+    const cancel = new AbortController();
+    let waiting: (() => void) | undefined;
+    const childWaiting = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    currentScript = async function* (prompts) {
+      const iterator = prompts[Symbol.asyncIterator]();
+      await iterator.next();
+      yield backgroundTasks("child");
+      yield taskStarted("child");
+      yield resultMessage("parent result");
+      waiting?.();
+      await iterator.next();
+    };
+
+    const harness = createClaudeHarness({});
+    const { turn } = harnessTurn({ cancel: cancel.signal, readOnly: false });
+    const running = harness.turns.runTurn(turn);
+    await childWaiting;
+    cancel.abort();
+    await running;
+  });
+
+  await t.test("wall clock", async () => {
+    currentScript = async function* (prompts) {
+      const iterator = prompts[Symbol.asyncIterator]();
+      await iterator.next();
+      yield backgroundTasks("child");
+      yield taskStarted("child");
+      yield resultMessage("parent result");
+      await iterator.next();
+    };
+
+    const harness = createClaudeHarness({ turnWallClockMs: 20 });
+    const { turn } = harnessTurn({ readOnly: false });
+    await assert.rejects(() => harness.turns.runTurn(turn), /Claude turn exceeded/);
+  });
+});
+
+test("ambient background tasks never hold the turn open", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield {
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "watcher", task_type: "monitor", description: "watcher", ambient: true }],
+    };
+    yield resultMessage("parent result");
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn } = harnessTurn({ readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+});
+
+test("a terminal task_updated releases the fallback edge tracking", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield taskStarted("child");
+    yield resultMessage("parent result");
+    assert.equal(await queueClosed(iterator), false);
+    yield taskUpdated("child", "killed");
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn } = harnessTurn({ readOnly: false });
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "parent result");
+});
+
+test("a turn without background work closes after its normal result", async () => {
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    yield resultMessage("done");
+    assert.equal((await iterator.next()).done, true);
+  };
+
+  const harness = createClaudeHarness({});
+  const { turn } = harnessTurn();
+  const result = await harness.turns.runTurn(turn);
+
+  assert.equal(result.reply, "done");
+});
 
 test("model calls are counted per API response and charged their real input tokens", async () => {
   currentScript = async function* (prompts) {
