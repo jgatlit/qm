@@ -26,6 +26,7 @@ export interface DurableMap<T> {
   deleteIf?(id: string, predicate: (value: T) => boolean): Promise<boolean>;
   delete(id: string): Promise<void>;
   take(id: string): Promise<T | null>;
+  version(): Promise<string>;
 }
 
 /**
@@ -97,7 +98,21 @@ function applyPatch<T>(value: T, patch: Partial<T>): T {
 }
 
 export function createMemoryMap<T>(): DurableMap<T> {
-  const m = new Map<string, T>();
+  const backing = new Map<string, T>();
+  let version = 0;
+  const m = {
+    get: (id: string) => backing.get(id),
+    has: (id: string) => backing.has(id),
+    entries: () => backing.entries(),
+    set(id: string, value: T) {
+      version++;
+      backing.set(id, value);
+    },
+    delete(id: string) {
+      version++;
+      return backing.delete(id);
+    },
+  };
   const sortedEntries = () =>
     [...m.entries()].sort(([a], [b]) => {
       if (a < b) return -1;
@@ -172,10 +187,42 @@ export function createMemoryMap<T>(): DurableMap<T> {
       m.delete(id);
       return v;
     },
+    async version() {
+      return String(version);
+    },
   };
 }
 
 const VERSIONS_TABLE = "durable_map_versions";
+
+const pendingVersionReads = new WeakMap<PgPool, Map<string, PromiseWithResolvers<string>>>();
+
+function readTableVersion(pg: PgPool, table: string): Promise<string> {
+  let batch = pendingVersionReads.get(pg);
+  if (!batch) {
+    const waiting = new Map<string, PromiseWithResolvers<string>>();
+    batch = waiting;
+    pendingVersionReads.set(pg, waiting);
+    queueMicrotask(() => {
+      pendingVersionReads.delete(pg);
+      pg.q(`SELECT tbl, v FROM ${VERSIONS_TABLE} WHERE tbl = ANY($1::text[])`, [[...waiting.keys()]]).then(
+        (rows) => {
+          const versions = new Map(rows.map((row) => [row.tbl as string, String(row.v)]));
+          for (const [tbl, reader] of waiting) reader.resolve(versions.get(tbl) ?? "");
+        },
+        (error: unknown) => {
+          for (const reader of waiting.values()) reader.reject(error);
+        },
+      );
+    });
+  }
+  let reader = batch.get(table);
+  if (!reader) {
+    reader = Promise.withResolvers<string>();
+    batch.set(table, reader);
+  }
+  return reader.promise;
+}
 
 export function createPostgresMap<T>(
   pg: PgPool,
@@ -250,10 +297,12 @@ export function createPostgresMap<T>(
   }
   const CACHE_MAX_AGE_MS = 15_000;
   let cache: { v: string; fetchedAt: number; entries: Array<[string, T]> } | null = null;
-  async function snapshot(): Promise<Array<[string, T]>> {
+  async function version(): Promise<string> {
     await ready();
-    const vRows = await pg.q(`SELECT v FROM ${VERSIONS_TABLE} WHERE tbl = '${table}'`);
-    const v = vRows.length ? String(vRows[0]!.v) : "";
+    return readTableVersion(pg, table);
+  }
+  async function snapshot(): Promise<Array<[string, T]>> {
+    const v = await version();
     if (!cache || cache.v !== v || Date.now() - cache.fetchedAt > CACHE_MAX_AGE_MS) {
       const rows = await pg.q(`SELECT id, json FROM ${table} ORDER BY id`);
       cache = { v, fetchedAt: Date.now(), entries: rows.map((row) => [row.id as string, row.json as T]) };
@@ -403,6 +452,7 @@ export function createPostgresMap<T>(
       const res = await withBump((client) => client.query(`DELETE FROM ${table} WHERE id = $1 RETURNING json`, [id]));
       return res.rows.length ? (res.rows[0]!.json as T) : null;
     },
+    version,
   };
 }
 

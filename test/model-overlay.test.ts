@@ -521,3 +521,40 @@ test("runtime normalization preserves native capabilities and reflects overlay c
   assert.equal(native.fastMode, true);
   assert.equal(native.effortLevel, "max");
 });
+
+test("model refresh reverifies registered models only after a model input changes", async () => {
+  const config = testConfig({ harness: "pi", openaiApiKey: "local-test-key" });
+  const built = buildApp(config, {
+    modelCredentialFetch: async () => Response.json({ data: [] }),
+    modelVerificationProbe: async () => {},
+  });
+  const server = createInsecureTestServer(built.app, serverDeps(config, built));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const put = () =>
+    fetch(`${base}/v1/admin/model-registry/${MODEL_ID}`, {
+      method: "PUT",
+      headers: ADMIN,
+      body: JSON.stringify({ ...spec, verify: true }),
+    });
+  try {
+    assert.equal((await put()).status, 200);
+    await built.refreshModels();
+    assert.ok(resolveModel(MODEL_ID));
+
+    setModelOverlays([]);
+    await built.refreshModels();
+    assert.equal(resolveModel(MODEL_ID), undefined);
+
+    assert.equal((await put()).status, 200);
+    await built.refreshModels();
+    assert.ok(resolveModel(MODEL_ID));
+
+    await built.modelCredentials.set("openai", "rotated-test-key", "admin-alice@default-org");
+    await built.refreshModels();
+    assert.equal(resolveModel(MODEL_ID), undefined);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    setModelOverlays([]);
+  }
+});

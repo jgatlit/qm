@@ -167,7 +167,8 @@ import {
   turnFailureMessage,
   type TurnFailurePayload,
 } from "./turn-error.ts";
-import { personKey, samePerson } from "../directory/person.ts";
+import { personKey, rosterIds, samePerson } from "../directory/person.ts";
+import type { FeatureName } from "../feature-flags.ts";
 import { sleep } from "../util/async.ts";
 import { hashId } from "../util/crypto.ts";
 import { randomUUID } from "node:crypto";
@@ -259,6 +260,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const pending = deps.approvals;
   const transcripts = createTranscriptSource(deps.sessions);
   const approvalGrants = deps.approvalGrants;
+  const approvalGrantsFor = async (actorId: string) =>
+    (await approvalGrants.select({ where: { field: "actorId", anyOfFold: rosterIds(actorId) } })).filter((grant) =>
+      samePerson(grant.actorId, actorId),
+    );
   const memoryPolicy = deps.memoryPolicy ?? DEFAULT_MEMORY_POLICY;
   const memoryStrategy =
     deps.memoryStrategy ?? createPerTurnStrategy({ harness: deps.harness.models, memory: deps.memory });
@@ -553,8 +558,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           (!!conversation.publishMembers?.length && conversation.publishMembers.every((p) => p.type === "internal")));
       const authoredDetection =
         input.origin.kind === "ambient" && input.origin.live === true && conversation.kind !== "dm";
-      const delegationEnabled =
-        !external && (await deps.featureFlags?.enabled("responsive_spine", `personal:${actor.id}` as ScopeId)) === true;
+      const actorFeatures = (await deps.featureFlags?.enabledFor(personalScope(actor.id))) ?? new Set<FeatureName>();
+      const delegationEnabled = !external && actorFeatures.has("responsive_spine");
       const delegatedOrigin =
         !external && deps.runs
           ? await delegatedAuthorizationOrigin(input, { runs: deps.runs, sessions: deps.sessions })
@@ -924,8 +929,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (flaggedScreenedInput) {
         const existing = await deps.sessions.getByThread(conversation.threadRef);
         const flagGrantKey = `security-screen:${input.surface ?? "unknown"}`;
-        for (const grant of await approvalGrants.all()) {
-          if (!samePerson(grant.actorId, actor.id)) continue;
+        for (const grant of await approvalGrantsFor(actor.id)) {
           if (!resolution.approvalGrantModes[grant.scope]) continue;
           if (grant.scope === "session" && grant.sessionId !== existing?.id) continue;
           if ((grant.approvalKey ?? grant.command) !== flagGrantKey && grant.command !== "security-screen") continue;
@@ -1086,10 +1090,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const surfaceName =
         input.origin.kind === "automation" && input.origin.destination ? "slack" : (input.surface ?? "slack");
       const sessionSyscalls =
-        !external &&
-        deps.sessionSyscalls &&
-        (delegationEnabled ||
-          (await deps.featureFlags?.enabled("persistent_subagents", `personal:${actor.id}` as ScopeId)) === true)
+        !external && deps.sessionSyscalls && (delegationEnabled || actorFeatures.has("persistent_subagents"))
           ? deps.sessionSyscalls
           : undefined;
       const delegateWork = requiresDelegation(input, delegationEnabled);
@@ -1359,8 +1360,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
       let releasedToolOutput: PendingApprovalRecord["screenedOutput"];
       const commandUses = new Map<string, number>();
-      for (const grant of await approvalGrants.all()) {
-        if (!samePerson(grant.actorId, actor.id)) continue;
+      for (const grant of await approvalGrantsFor(actor.id)) {
         if (grant.scope === "session" && grant.sessionId !== session.id) continue;
         if (!resolution.approvalGrantModes[grant.scope]) continue;
         commandUses.set(grant.approvalKey ?? grant.command, Infinity);
@@ -1482,10 +1482,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         commandCredentials.push(placeCredential(credential));
         credentialDescriptions.push({ handle: credential.handle, ownerId, description, credentialId });
       };
-      const registerKeychainCredentials = async (addCredential: typeof addCredentialToCatalog): Promise<void> => {
+      const turnScopeGrants =
+        !external && !strictReadOnly && deps.keychain ? deps.keychain.grantsForScope(scopeId) : undefined;
+      turnScopeGrants?.catch(() => undefined);
+      const registerKeychainCredentials = async (
+        addCredential: typeof addCredentialToCatalog,
+        scopeGrants = () => deps.keychain!.grantsForScope(scopeId),
+      ): Promise<void> => {
         if (external || strictReadOnly || !deps.keychain) return;
         const keychain = deps.keychain;
-        for (const { grant, credential } of await keychain.grantsForScope(scopeId)) {
+        for (const { grant, credential } of await scopeGrants()) {
           if (credential.kind === "broker" || isBackendCredential(credential)) continue;
           addCredential(
             {
@@ -1526,7 +1532,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           }
         }
       };
-      await registerKeychainCredentials(addCredentialToCatalog);
+      await registerKeychainCredentials(addCredentialToCatalog, () => turnScopeGrants!);
       const registerConnectorCredentials = async (addCredential: typeof addCredentialToCatalog): Promise<void> => {
         if (!external && !strictReadOnly && deps.connectorTokens && ownCredentialsAllowed) {
           const tokens = deps.connectorTokens;
@@ -1592,14 +1598,18 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (orgWideAudience) for (const record of records) if (record.source === "deployment") granted.add(record.slug);
         return granted;
       };
-      let serviceCredRecords: PublicServiceCredential[] = [];
-      let grantedCredSlugs = new Set<string>();
-      if (!strictReadOnly && deps.serviceCreds) {
-        serviceCredRecords = (await deps.serviceCreds.listServiceCredentials(resolution.orgScopeId)).filter((record) =>
+      const readServiceCredentials = async () => {
+        const records = (await deps.serviceCreds!.listServiceCredentials(resolution.orgScopeId)).filter((record) =>
           serviceAllowed(record.slug),
         );
-        if (serviceCredRecords.length > 0) grantedCredSlugs = await grantedServiceCredSlugs(serviceCredRecords);
-      }
+        return { records, granted: records.length ? await grantedServiceCredSlugs(records) : new Set<string>() };
+      };
+      const turnServiceCredentials =
+        !strictReadOnly && deps.serviceCreds
+          ? await readServiceCredentials()
+          : { records: [] as PublicServiceCredential[], granted: new Set<string>() };
+      const serviceCredRecords = turnServiceCredentials.records;
+      const grantedCredSlugs = turnServiceCredentials.granted;
       const authorizeServiceCredential = async (slug: string): Promise<void> => {
         if (!serviceAllowed(slug)) throw new Error("Service is not approved for external Slack.");
         if ((await aclGrantedServiceCredSlugs()).has(slug)) return;
@@ -1755,12 +1765,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const registerServiceCredentials = async (
         addCredential: typeof addCredentialToCatalog,
         requestedHandles: readonly string[],
+        current = readServiceCredentials,
       ): Promise<void> => {
         if (strictReadOnly || !deps.serviceCreds) return;
-        const records = (await deps.serviceCreds.listServiceCredentials(resolution.orgScopeId)).filter((record) =>
-          serviceAllowed(record.slug),
-        );
-        const granted = await grantedServiceCredSlugs(records);
+        const { records, granted } = await current();
         const available = records.filter(
           (record) => !isBackendCredential(record) && record.enabled && record.hasSecret && granted.has(record.slug),
         );
@@ -1840,7 +1848,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           }
         }
       };
-      await registerServiceCredentials(addCredentialToCatalog, []);
+      await registerServiceCredentials(addCredentialToCatalog, [], async () => turnServiceCredentials);
       if (!strictReadOnly && actor.type === "internal") {
         for (const tool of brokeredTools) {
           const broker = deps.layerBrokerFor?.(tool);
@@ -1998,9 +2006,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           await Promise.all(pendingScreenRequests.splice(0).map((rec) => recordScreenRequest(rec)));
           return true;
         });
-        const memoryWindow = await deps.sessions.getContextWindow(session.id);
-
-        const memoryView = await context.memorySnapshot();
+        const [memoryWindow, memoryView] = await Promise.all([
+          deps.sessions.getContextWindow(session.id),
+          context.memorySnapshot(),
+        ]);
+        const earlyRecallQuery = memoryRecallQuery(input.text, filterHistory(forModelContext(memoryWindow.entries)));
+        const earlyRecall = context.recallMemory(earlyRecallQuery, memoryView.loaded);
+        earlyRecall.catch(() => undefined);
+        let historyAppended = input.approval !== undefined;
         const captureDependencies = () => [
           ...memoryView.facts,
           ...(!memoryView.complete ||
@@ -2014,6 +2027,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             : []),
         ];
         const historyWindow = () => deps.sessions.getContextWindow(session.id);
+        const turnWindow = async () => (historyAppended ? historyWindow() : memoryWindow);
         if (input.approval) {
           const p = await pending.get(input.approval.requestId);
           const decision = input.approval.approved ? "approve" : "deny";
@@ -2243,9 +2257,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (deps.signingSecret && deps.apiBaseUrl && (deps.crons || deps.webhooks || deps.monitors)) {
           const nowMs = Date.now();
           const obligations = await Promise.all([
-            deps.crons?.list() ?? [],
-            deps.webhooks?.list() ?? [],
-            deps.monitors?.enabled() ?? [],
+            deps.crons?.ownedBy(scopeId) ?? [],
+            deps.webhooks?.ownedBy(scopeId) ?? [],
+            deps.monitors?.ownedBy(scopeId) ?? [],
           ])
             .then(([crons, hooks, mons]) =>
               renderStandingObligations(
@@ -2253,13 +2267,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   (c) =>
                     c.enabled &&
                     !c.archived &&
-                    c.ownerScopeId === scopeId &&
                     (c.schedule.cron != null ||
                       c.schedule.everyMs != null ||
                       (c.schedule.firstFireAt ?? c.createdAt) > nowMs),
                 ),
-                hooks.filter((w) => w.enabled && w.ownerScopeId === scopeId),
-                mons.filter((m) => m.ownerScopeId === scopeId && m.expiresAt > nowMs),
+                hooks.filter((w) => w.enabled),
+                mons.filter((m) => m.enabled && m.expiresAt > nowMs),
               ),
             )
             .catch(swallowAs("orchestrator: standing-obligations read", null));
@@ -2314,7 +2327,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           const [entriesByOwner, connectorsByOwner, scopeGrants, scopeAsks] = await Promise.all([
             !external ? (deps.keychain?.listByOwners(members.map((m) => m.id)) ?? new Map()) : new Map(),
             !external ? (deps.keychain?.listConnectorsByOwners(members.map((m) => m.id)) ?? new Map()) : new Map(),
-            !external ? (deps.keychain?.grantsForScope(scopeId) ?? []) : [],
+            !external ? (turnScopeGrants ?? deps.keychain?.grantsForScope(scopeId) ?? []) : [],
             !external ? (deps.keychain?.listAsks({ requesterScopeId: scopeId }) ?? []) : [],
           ]);
           const keychainBlock = renderKeychainManifest({
@@ -2348,7 +2361,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             (recordedTurn ?? findTrailingPartialTurn((await transcripts.forRender(session.id)).entries, input.runId))
           )
         ) {
-          const detectHistory = filterHistory((await historyWindow()).entries.slice(-DETECT_HISTORY_TAIL));
+          const detectHistory = filterHistory((await turnWindow()).entries.slice(-DETECT_HISTORY_TAIL));
           const decision = await deps.harness.models
             .shouldRespond({
               session,
@@ -2626,10 +2639,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             `[orchestrator] trigger delivery has no surface tools (missing deliveries store?) — reply would be lost session=${session.id}`,
           );
 
-        const canInstallCanvas =
-          deps.installSharedCanvas &&
-          liveTurn &&
-          (await deps.featureFlags?.enabled("ui_canvas", personalScope(actor.id))) === true;
+        const canInstallCanvas = deps.installSharedCanvas && liveTurn && actorFeatures.has("ui_canvas");
         const baseTools = createToolContext({
           desktopClientId: desktopClientForTurn(input),
           ...(canInstallCanvas
@@ -2768,10 +2778,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const tools = external ? externalTools(baseTools, accessResource) : baseTools;
 
         if (input.attachments?.some((attachment) => attachment.sourceId)) {
-          input.attachments = withoutAlreadyIngested(
-            input.attachments,
-            (await deps.sessions.getContextWindow(session.id)).entries,
-          );
+          input.attachments = withoutAlreadyIngested(input.attachments, (await turnWindow()).entries);
         }
         const inbound =
           input.attachments?.length && !strictReadOnly
@@ -2828,13 +2835,19 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             if (e instanceof ProjectRosterChanged) throw e;
             swallow("orchestrator: overheard catch-up import", e);
           }
-          if (importedEntries.length) importedOverheard.push(...toImport);
+          if (importedEntries.length) {
+            importedOverheard.push(...toImport);
+            historyAppended = true;
+          }
         }
 
-        const rawEntries = (await historyWindow()).entries;
+        const rawEntries = (await turnWindow()).entries;
         const priorTurns = input.priorTurns;
         let visibleHistory = filterHistory(forModelContext(rawEntries));
-        const recalled = await context.recallMemory(memoryRecallQuery(input.text, visibleHistory), memoryView.loaded);
+        const recallQuery = memoryRecallQuery(input.text, visibleHistory);
+        const recalled =
+          recallQuery === earlyRecallQuery ? earlyRecall : context.recallMemory(recallQuery, memoryView.loaded);
+        recalled.catch(() => undefined);
         const partial = isRetry ? (recordedTurn ?? findTrailingPartialTurn(visibleHistory, input.runId)) : null;
         let resumePlan = partial ? resumeStrategy(visibleHistory, partial) : null;
         if (partial && resumePlan?.kind === "settle") {
@@ -3213,7 +3226,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           continuation?: { history: SessionEntry[] },
         ) => {
           const recall = memoryRecallDelta(
-            recalled,
+            await recalled,
             continuation?.history ?? history,
             memoryView.held,
             context.memoryLabels,

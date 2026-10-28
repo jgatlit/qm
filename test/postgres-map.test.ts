@@ -26,7 +26,7 @@ before(async () => {
   const p = new pg.Pool({ connectionString: URL });
   await p.query("DROP TABLE IF EXISTS qm_schema_migrations CASCADE");
   await p.query(
-    "DROP TABLE IF EXISTS map_webhooks, map_webhook_history, map_widgets, map_wide_widgets, map_scoped_widgets, map_crons, map_keychain_creds, map_keychain_grants, map_keychain_asks, process_sessions, durable_map_versions CASCADE",
+    "DROP TABLE IF EXISTS map_webhooks, map_webhook_history, map_widgets, map_wide_widgets, map_scoped_widgets, map_crons, map_owned_crons, map_version_left, map_version_right, map_keychain_creds, map_keychain_grants, map_keychain_asks, process_sessions, durable_map_versions CASCADE",
   );
   await p.end();
 });
@@ -537,4 +537,48 @@ test("pg map: an indexed select plans both branches through their indexes", { sk
     await pg.q("DROP TABLE IF EXISTS map_scoped_widgets");
     await factory.pool.close();
   }
+});
+
+test("pg map: versions read together share one query and track writes from another instance", { skip }, async () => {
+  const reader = createPostgresMapFactory(URL!);
+  const writer = createPostgresMapFactory(URL!);
+  const left = reader.map<Widget>("map_version_left");
+  const right = reader.map<Widget>("map_version_right");
+  await Promise.all([left.version(), right.version()]);
+  const versionReads: string[] = [];
+  const query = reader.pool.q.bind(reader.pool);
+  reader.pool.q = (text, params, options) => {
+    if (text.includes("durable_map_versions")) versionReads.push(text);
+    return query(text, params, options);
+  };
+  const [leftBefore, rightBefore] = await Promise.all([left.version(), right.version(), left.all(), right.all()]);
+  assert.equal(versionReads.length, 1);
+
+  await writer.map<Widget>("map_version_left").put("w1", { name: "w1", tags: [], nested: { n: 1 } });
+  const [leftAfter, rightAfter, rows] = await Promise.all([left.version(), right.version(), left.all()]);
+  assert.notEqual(leftAfter, leftBefore);
+  assert.equal(rightAfter, rightBefore);
+  assert.deepEqual(
+    rows.map((row) => row.name),
+    ["w1"],
+  );
+});
+
+test("pg map: trigger stores list only the owner's rows", { skip }, async () => {
+  const f = createPostgresMapFactory(URL!);
+  const crons = createCronStore(f.map<Cron>("map_owned_crons", ["ownerScopeId"]));
+  const upper = scopeId("personal", "OwnerU");
+  const lower = scopeId("personal", "owneru");
+  for (const owner of [upper, lower, scopeId("personal", "other")])
+    await crons.create({
+      owner: owner.slice("personal:".length),
+      createdBy: owner.slice("personal:".length),
+      ownerScopeId: owner,
+      schedule: { everyMs: 60_000 },
+      action: `check ${owner}`,
+    });
+  assert.deepEqual(
+    (await crons.ownedBy(upper)).map((cron) => cron.ownerScopeId),
+    [upper],
+  );
 });

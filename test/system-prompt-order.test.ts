@@ -21,6 +21,7 @@ import { createAuditLog } from "../src/audit/audit-log.ts";
 import { createRateLimiter } from "../src/ratelimit/rate-limiter.ts";
 import { createMockHarness } from "./support/mock-harness.ts";
 import { createCronStore, type CronStore } from "../src/cron/cron-store.ts";
+import { sleep } from "../src/util/async.ts";
 import { createDeployStore } from "../src/deploy/deploy-store.ts";
 import { createDockerDeployProvider } from "../src/deploy/docker-deploy-provider.ts";
 import { createDeployService } from "../src/deploy/deploy-service.ts";
@@ -1202,7 +1203,7 @@ test("scheduled-work changes update the next turn's system block without rewriti
   await crons.setEnabled(cron.id, false);
   assert.equal((await orchestrator.handleTurn({ ...input, text: "third" })).status, "ok");
   delete sandbox.profile.spec;
-  crons.list = async () => {
+  crons.ownedBy = async () => {
     throw new Error("inventory unavailable");
   };
   assert.equal((await orchestrator.handleTurn({ ...input, text: "fourth" })).status, "ok");
@@ -1257,3 +1258,36 @@ for (const mode of ["safe", "blocked", "unavailable", "ordinary", "observe"] as 
     else assert.ok(refreshedScreens > 0);
   });
 }
+
+test("memory recall is already running while the scheduled-work inventory is read", async () => {
+  const crons = createCronStore();
+  const recallStarted = Promise.withResolvers<void>();
+  const afterRecall =
+    <A extends unknown[], R>(read: (...args: A) => Promise<R>) =>
+    async (...args: A) => {
+      await recallStarted.promise;
+      return read(...args);
+    };
+  Object.assign(crons, { list: afterRecall(crons.list), ownedBy: afterRecall(crons.ownedBy) });
+  const seen: HarnessTurnInput[] = [];
+  const harness = createMockHarness();
+  const runTurn = harness.turns.runTurn;
+  harness.turns.runTurn = async (turn) => {
+    seen.push(turn);
+    return runTurn(turn);
+  };
+  const { orchestrator, memory } = buildOrchestrator({ crons, harness });
+  await memory.capture(scopeId("personal", actor.id), ["OVERLAP_MARKER prefers aisle seats"], Date.now());
+  const recall = memory.recall.bind(memory);
+  memory.recall = async (scope, context) => {
+    recallStarted.resolve();
+    return recall(scope, context);
+  };
+  const turn = orchestrator.handleTurn(dm("dm:U1:recall-overlap", "book my OVERLAP_MARKER flight"));
+  const timedOut = Symbol("timed out");
+  const result = await Promise.race([turn, sleep(5_000).then(() => timedOut)]);
+  recallStarted.resolve();
+  assert.notEqual(result, timedOut, "recall waited behind the scheduled-work read");
+  assert.equal((result as Awaited<typeof turn>).status, "ok");
+  assert.match(seen[0]!.environment!, /OVERLAP_MARKER prefers aisle seats/);
+});

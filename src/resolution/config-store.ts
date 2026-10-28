@@ -289,6 +289,37 @@ export function createMemoryConfigStore(
       await write();
       apply();
     });
+  const freshnessResets: Array<() => void> = [];
+  const freshFrom = (
+    store: Pick<DurableMap<unknown>, "version">,
+    key: string,
+    load: (id: ScopeId) => Promise<void>,
+  ) => {
+    let seen: string | undefined;
+    const current = new Set<ScopeId>();
+    freshnessResets.push(() => {
+      seen = undefined;
+      current.clear();
+    });
+    return async (ids: readonly ScopeId[]): Promise<void> => {
+      const version = await store.version();
+      if (version !== seen) {
+        seen = version;
+        current.clear();
+      }
+      await Promise.all(
+        [...new Set(ids)]
+          .filter((id) => !current.has(id))
+          .map((id) =>
+            writeQueue(`${key}:${id}`, async () => {
+              if (seen === version && current.has(id)) return;
+              await load(id);
+              if (seen === version) current.add(id);
+            }),
+          ),
+      );
+    };
+  };
   type SettingKey = Exclude<keyof ConfigStoreMaps, "connectorClients">;
   type Row<M extends SettingKey> = NonNullable<ConfigStoreMaps[M]> extends DurableMap<infer R> ? R : never;
   const setting = <M extends SettingKey, T>(
@@ -303,14 +334,17 @@ export function createMemoryConfigStore(
     const refresh = async (id: ScopeId) => {
       if (!orgOnly || id === org) load(id, await store.get(id));
     };
+    const fresh = freshFrom(store, name, async (id) => {
+      load(id, await store.get(id));
+    });
     return {
       store,
       refresh,
-      reload: (id: ScopeId) => writeQueue(`${name}:${id}`, () => refresh(id)),
+      fresh,
       get: (id: ScopeId) => cache.get(id),
       durable: async (id: ScopeId) => {
-        const row = await store.get(id);
-        return row ? read(row) : undefined;
+        await fresh([id]);
+        return structuredClone(cache.get(id));
       },
       set(id: ScopeId, value: T | null) {
         const row = value === null ? null : toRow(id, value);
@@ -459,6 +493,31 @@ export function createMemoryConfigStore(
   };
   souls.set(org, defaultOrgSoul);
 
+  const freshSouls = freshFrom(soulStore, "soul", async (id) => {
+    const soul = await soulStore.get(id);
+    if (soul) souls.set(id, { content: soul.content, version: soul.version });
+    else if (id !== org) souls.delete(id);
+  });
+  const freshBaseModels = freshFrom(baseModelStore, "model", async (id) => {
+    cacheBaseModel(id, await baseModelStore.get(id));
+  });
+  const baseModelRow = async (id: ScopeId): Promise<PersistedBaseModel | null> => {
+    await freshBaseModels([id]);
+    return structuredClone(baseModels.get(id)) ?? null;
+  };
+  const securityPosture = (id: ScopeId): SecurityPosture => {
+    const orgPosture = settings.securityPostures.get(org) ?? defaultSecurityPosture;
+    return id === org ? orgPosture : composeSecurityPosture(orgPosture, settings.securityPostures.get(id));
+  };
+  const sharingPosture = (id: ScopeId): SharingPosture => {
+    const orgPosture = settings.sharingPostures.get(org) ?? defaultSharingPosture;
+    return id === org ? orgPosture : composeSharingPostures(orgPosture, [settings.sharingPostures.get(id)]);
+  };
+  const approvalGrantModes = (id: ScopeId): ApprovalGrantModes => {
+    const orgModes = settings.approvalGrantModes.get(org) ?? DEFAULT_APPROVAL_GRANT_MODES;
+    if (id === org) return { ...orgModes };
+    return composeApprovalGrantModes(orgModes, settings.approvalGrantModes.get(id));
+  };
   let hydrated: Promise<void> | null = null;
   const loadSoulCache = (id: ScopeId, soul: PersistedSoul | null): void => {
     if (soul) souls.set(id, { content: soul.content, version: soul.version });
@@ -498,18 +557,14 @@ export function createMemoryConfigStore(
 
   return {
     async refreshSecurity(ids) {
-      await Promise.all(
-        ids.flatMap((id) => [
-          writeQueue(`soul:${id}`, async () => {
-            const soul = await soulStore.get(id);
-            if (soul) souls.set(id, { content: soul.content, version: soul.version });
-            else if (id !== org) souls.delete(id);
-          }),
-          settings.commandPolicies.reload(id),
-          settings.egressPolicies.reload(id),
-          settings.sharingPostures.reload(id),
-        ]),
-      );
+      await Promise.all([
+        freshSouls(ids),
+        settings.commandPolicies.fresh(ids),
+        settings.egressPolicies.fresh(ids),
+        settings.sharingPostures.fresh(ids),
+        settings.securityPostures.fresh(ids),
+        settings.approvalGrantModes.fresh(ids),
+      ]);
     },
     hydrate() {
       if (!hydrated) {
@@ -532,6 +587,7 @@ export function createMemoryConfigStore(
           for (const revisions of soulHistory.values()) revisions.sort((a, b) => b.version - a.version);
           for (const r of await baseModelStore.all()) baseModels.set(r.scopeId, r);
           await Promise.all(allSettings.map((setting) => setting.hydrate()));
+          for (const reset of freshnessResets) reset();
         })();
       }
       return hydrated;
@@ -643,14 +699,10 @@ export function createMemoryConfigStore(
     },
     getCommandPolicy: (id) => settings.commandPolicies.get(id) ?? (id === org ? orgDefaultPolicy : null),
     setCommandPolicy: (id, policy) => settings.commandPolicies.set(id, policy),
-    getSecurityPosture(id) {
-      const orgPosture = settings.securityPostures.get(org) ?? defaultSecurityPosture;
-      return id === org ? orgPosture : composeSecurityPosture(orgPosture, settings.securityPostures.get(id));
-    },
+    getSecurityPosture: securityPosture,
     async getSecurityPostureDurable(id) {
-      const orgPosture = (await settings.securityPostures.durable(org)) ?? defaultSecurityPosture;
-      if (id === org) return orgPosture;
-      return composeSecurityPosture(orgPosture, await settings.securityPostures.durable(id));
+      await settings.securityPostures.fresh([org, id]);
+      return securityPosture(id);
     },
     async setSecurityPosture(id, posture) {
       const effective =
@@ -659,35 +711,25 @@ export function createMemoryConfigStore(
           : composeSecurityPosture((await settings.securityPostures.durable(org)) ?? defaultSecurityPosture, posture);
       await settings.securityPostures.set(id, effective);
     },
-    getSharingPosture(id) {
-      const orgPosture = settings.sharingPostures.get(org) ?? defaultSharingPosture;
-      return id === org ? orgPosture : composeSharingPostures(orgPosture, [settings.sharingPostures.get(id)]);
-    },
+    getSharingPosture: sharingPosture,
     async getSharingPostureDurable(id) {
-      const orgPosture = (await settings.sharingPostures.durable(org)) ?? defaultSharingPosture;
-      return id === org ? orgPosture : composeSharingPostures(orgPosture, [await settings.sharingPostures.durable(id)]);
+      await settings.sharingPostures.fresh([org, id]);
+      return sharingPosture(id);
     },
     getSharingPostureOwnDurable: async (id) => (await settings.sharingPostures.durable(id)) ?? null,
     async resolveSharingPostureDurable(personalId, targetId) {
-      const [orgPosture, personalPosture, targetPosture] = await Promise.all(
-        [org, personalId, targetId].map((id) => settings.sharingPostures.durable(id)),
-      );
-      return composeSharingPostures(orgPosture ?? defaultSharingPosture, [
-        personalId === org ? undefined : personalPosture,
-        targetId === org || targetId === personalId ? undefined : targetPosture,
+      await settings.sharingPostures.fresh([org, personalId, targetId]);
+      return composeSharingPostures(settings.sharingPostures.get(org) ?? defaultSharingPosture, [
+        personalId === org ? undefined : settings.sharingPostures.get(personalId),
+        targetId === org || targetId === personalId ? undefined : settings.sharingPostures.get(targetId),
       ]);
     },
     setSharingPosture: (id, posture) => settings.sharingPostures.set(id, posture),
     clearSharingPosture: (id) => settings.sharingPostures.set(id, null),
-    getApprovalGrantModes(id) {
-      const orgModes = settings.approvalGrantModes.get(org) ?? DEFAULT_APPROVAL_GRANT_MODES;
-      if (id === org) return { ...orgModes };
-      return composeApprovalGrantModes(orgModes, settings.approvalGrantModes.get(id));
-    },
+    getApprovalGrantModes: approvalGrantModes,
     async getApprovalGrantModesDurable(id) {
-      const orgModes = (await settings.approvalGrantModes.durable(org)) ?? DEFAULT_APPROVAL_GRANT_MODES;
-      if (id === org) return { ...orgModes };
-      return composeApprovalGrantModes(orgModes, await settings.approvalGrantModes.durable(id));
+      await settings.approvalGrantModes.fresh([org, id]);
+      return approvalGrantModes(id);
     },
     setApprovalGrantModes: (id, modes) =>
       settings.approvalGrantModes.set(id, { session: !!modes.session, always: !!modes.always }),
@@ -720,7 +762,7 @@ export function createMemoryConfigStore(
       return selection ? { ...selection } : undefined;
     },
     getPurposeRuntimeDurable: async (purpose) => {
-      const selection = (await baseModelStore.get(org))?.[`${purpose}Runtime`];
+      const selection = (await baseModelRow(org))?.[`${purpose}Runtime`];
       return selection ? { ...selection } : undefined;
     },
     setPurposeRuntime,
@@ -766,7 +808,7 @@ export function createMemoryConfigStore(
     onRuntimeSelectionChanged(listener) {
       runtimeSelectionListeners.add(listener);
     },
-    getRuntimeSelectionDurable: async (id) => runtimeSelection(await baseModelStore.get(id)),
+    getRuntimeSelectionDurable: async (id) => runtimeSelection(await baseModelRow(id)),
     getApprovedHarnesses: () => {
       const ids = settings.approvedHarnesses.get(org);
       return ids ? [...ids] : null;
@@ -796,10 +838,9 @@ export function createMemoryConfigStore(
       const id = scopeId("personal", principalId);
       await settings.individualModelAuth.store.put(id, { scopeId: id, on, ...(on && provider ? { provider } : {}) });
     },
-    getBaseModelOwnDurable: async (id) => (await baseModelStore.get(id))?.modelId ?? null,
+    getBaseModelOwnDurable: async (id) => (await baseModelRow(id))?.modelId ?? null,
     getBaseModelDurable: async (id) =>
-      (await baseModelStore.get(id))?.modelId ??
-      (id === org ? null : ((await baseModelStore.get(org))?.modelId ?? null)),
+      (await baseModelRow(id))?.modelId ?? (id === org ? null : ((await baseModelRow(org))?.modelId ?? null)),
     getWebuiModels: (id) => settings.webuiModels.get(id) ?? null,
     setWebuiModels: (id, ids) => settings.webuiModels.set(id, ids?.length ? ids : null),
     getWebuiModelsDurable: async (id) =>
@@ -820,7 +861,7 @@ export function createMemoryConfigStore(
     setBrowseMaxSteps: (id, steps) => settings.browseMaxSteps.set(id, steps),
     getBrowseModel: (id) => settings.browseModels.get(id) ?? null,
     setBrowseModel: (id, modelId) => settings.browseModels.set(id, modelId),
-    getEmbeddingModelDurable: async () => (await baseModelStore.get(org))?.embeddingModelId ?? null,
+    getEmbeddingModelDurable: async () => (await baseModelRow(org))?.embeddingModelId ?? null,
     setEmbeddingModel: async (modelId) => {
       await writeQueue(`model:${org}`, async () => {
         const saved = await updateBaseModelRow(org, (current) => {

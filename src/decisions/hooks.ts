@@ -1,5 +1,11 @@
 import type { AuditLog } from "../audit/audit-log.ts";
-import { runHook, type DecisionBackend, type DecisionHook, type DecisionResult } from "./decisions.ts";
+import {
+  runHook,
+  type DecisionBackend,
+  type DecisionHook,
+  type DecisionResult,
+  type DecisionRule,
+} from "./decisions.ts";
 import type { DecisionStore } from "./store.ts";
 import { swallowAs } from "../util/errors.ts";
 
@@ -40,9 +46,8 @@ export interface DecisionTurn {
 }
 
 export function createDecisionHooks(store: DecisionStore | undefined, backend: DecisionBackend, audit: AuditLog) {
-  return async (hook: DecisionHook, state: string, turn: DecisionTurn) => {
-    const rules = (await store?.rules(hook)) ?? [];
-    if (!store || !rules.length) return undefined;
+  const run = async (rules: readonly DecisionRule[], hook: DecisionHook, state: string, turn: DecisionTurn) => {
+    if (!rules.length) return undefined;
     const signal = AbortSignal.any([AbortSignal.timeout(HOOK_TIMEOUT_MS), ...(turn.cancel ? [turn.cancel] : [])]);
     const { decisive, results } = await runHook(rules, hook, state, backend, signal);
     for (const result of results)
@@ -61,6 +66,23 @@ export function createDecisionHooks(store: DecisionStore | undefined, backend: D
         }),
       });
     return decisive;
+  };
+  return async (hook: DecisionHook, state: string, turn: DecisionTurn) => {
+    const rules = (await store?.rules(hook)) ?? [];
+    const model = (rule: DecisionRule) => JSON.stringify([rule.model.provider, rule.model.model]);
+    const enforced = new Set(rules.filter((rule) => rule.mode === "enforce").map(model));
+    void run(
+      rules.filter((rule) => !enforced.has(model(rule))),
+      hook,
+      state,
+      turn,
+    ).catch(swallowAs("decisions: observe-only rules", undefined));
+    return run(
+      rules.filter((rule) => enforced.has(model(rule))),
+      hook,
+      state,
+      turn,
+    );
   };
 }
 

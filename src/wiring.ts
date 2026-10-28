@@ -70,7 +70,11 @@ import { createModelVerifier, type ModelVerifier } from "./model/model-verificat
 import type { probeModel } from "./harness/pi-harness.ts";
 import { createAwsRoleBroker, type AwsRoleBroker } from "./auth/aws-role-broker.ts";
 import type { SessionShare, SessionShareStore } from "./sessions/session-share.ts";
-import { createModelOverlayStore, type ModelOverlayStore } from "./model/model-overlay-store.ts";
+import {
+  createModelOverlayStore,
+  type ModelOverlayStore,
+  type StoredModelOverlay,
+} from "./model/model-overlay-store.ts";
 import { mkdirSync } from "node:fs";
 import type { StagedEnvelope } from "./slack/envelope-staging.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -304,12 +308,20 @@ import { createPostgresEgressAuditSink } from "./admin/postgres-egress-audit-sin
 import { createConsentLinkStore, type ConsentLinkStore, type ConsentLinkRecord } from "./connectors/consent-link.ts";
 import { createOAuthFlowStore, type OAuthFlowStore } from "./connectors/oauth-flow-store.ts";
 import { createModelGateway, type ModelGateway } from "./model/model-gateway.ts";
-import { createModelCredentialStore, type ModelCredentialStore } from "./model/model-credential-store.ts";
+import {
+  createModelCredentialStore,
+  type ModelCredentialStore,
+  type StoredModelCredential,
+} from "./model/model-credential-store.ts";
 import { refreshChatGPTTokens, refreshClaudeTokens } from "./model/subscription-oauth.ts";
 import { createUserModelCredentialStore, type UserModelCredentialStore } from "./model/user-model-credential-store.ts";
 import { type ModelGatewayTransportConfig, setProviderBaseUrls } from "./model/provider-endpoints.ts";
 import { setCustomProviders } from "./model/custom-providers.ts";
-import { createCustomProviderStore, type CustomProviderStore } from "./model/custom-provider-store.ts";
+import {
+  createCustomProviderStore,
+  type CustomProviderStore,
+  type StoredCustomProvider,
+} from "./model/custom-provider-store.ts";
 import { createMemorySessionStore } from "./sessions/memory-session-store.ts";
 import { createPostgresSessionStore } from "./sessions/postgres-session-store.ts";
 import { createMemoryToolOutputStore, createPostgresToolOutputStore } from "./sessions/tool-output.ts";
@@ -638,8 +650,9 @@ export function buildApp(
     : undefined;
   const gatewayTransport = gatewayCatalog?.transport;
   const directProviderAvailability = providerKeysPresent(config);
+  const modelCredentialBacking = artifactMap<StoredModelCredential>("model_credentials");
   const directModelCredentials = createModelCredentialStore({
-    backing: artifactMap("model_credentials"),
+    backing: modelCredentialBacking,
     keyMaterial: config.connectorSecretKey ?? randomBytes(32),
     fallback: {
       ...(config.anthropicApiKey ? { anthropic: config.anthropicApiKey } : {}),
@@ -681,7 +694,7 @@ export function buildApp(
   });
   void configStore.hydrate?.().catch(reportFailureAs("startup: hydrate configuration", undefined));
   const skills: SkillStore = createSkillStore({
-    backing: artifactMap<Skill>("skills"),
+    backing: artifactMap<Skill>("skills", ["scopeId"]),
     advisoryLock,
     ...(config.skillSigningSecret ? { signingSecret: config.skillSigningSecret } : {}),
   });
@@ -1380,9 +1393,10 @@ export function buildApp(
       await refreshModels();
       return fn();
     });
+  const customProviderBacking = artifactMap<StoredCustomProvider>("custom_model_providers");
   const customProviders = createCustomProviderStore({
     write: writeModelRegistry,
-    backing: artifactMap("custom_model_providers"),
+    backing: customProviderBacking,
     keyMaterial: config.connectorSecretKey ?? randomBytes(32),
   });
   const modelVerifier = createModelVerifier({
@@ -1392,14 +1406,21 @@ export function buildApp(
     probe: overrides.modelVerificationProbe,
     fetchImpl: overrides.modelCredentialFetch,
   });
-  const modelRegistry = createModelOverlayStore(artifactMap("model_registry"), writeModelRegistry, modelVerifier);
+  const modelRegistryBacking = artifactMap<StoredModelOverlay>("model_registry");
+  const modelRegistry = createModelOverlayStore(modelRegistryBacking, writeModelRegistry, modelVerifier);
+  const modelInputs = [customProviderBacking, modelRegistryBacking, modelCredentialBacking];
   const refreshCustomProviders = async () => {
     setCustomProviders(await customProviders.enabled());
   };
+  let refreshedModels: { versions: string; routes: unknown } | undefined;
   const refreshModels = async () => {
     await gatewayCatalog?.refresh();
+    const versions = (await Promise.all(modelInputs.map((map) => map.version()))).join(":");
+    const routes = gatewayTransport?.models;
+    if (refreshedModels?.versions === versions && refreshedModels.routes === routes) return;
     await refreshCustomProviders();
-    await modelRegistry.refresh();
+    const settled = await modelRegistry.refresh();
+    refreshedModels = settled ? { versions, routes } : undefined;
   };
   const resolveMemoryEmbedder = async (id: string): Promise<MemoryEmbedder> => {
     const model = resolveEmbeddingModel(id);
@@ -1543,7 +1564,6 @@ export function buildApp(
     return selectableModelCatalog(overrides.modelCredentialFetch);
   };
   const harness = createHarnessRouter(adapters, adapters.get(fallbackHarness)!, async (input, routedBy) => {
-    await refreshModels();
     const resolve = (requested: typeof input.runtime) =>
       resolveRuntimeChoiceDurable(
         configStore,
@@ -1956,7 +1976,7 @@ export function buildApp(
   const environments = config.databaseUrl
     ? createPostgresEnvironmentStore(config.databaseUrl)
     : createMemoryEnvironmentStore();
-  const monitors = createMonitorStore(artifactMap<Monitor>("monitors"));
+  const monitors = createMonitorStore(artifactMap<Monitor>("monitors", ["ownerScopeId"]));
   const loopStore = createLoopStore(artifactMap<Loop>("loops"));
   const loopItemsMap = artifactMap<LoopItem>("loop_items", ["loopId"]);
   const loopOwnerCache = new Map<string, string>();
@@ -1983,7 +2003,7 @@ export function buildApp(
   const loopGrants = createShipGrantStore(artifactMap<ShipGrant>("loop_ship_grants"));
   const cronChanged: { notify?: (id: string) => void } = {};
   const cronFires = config.databaseUrl ? createPostgresCronFireStore(config.databaseUrl) : createMemoryCronFireStore();
-  const cronsBase = createCronStore(artifactMap<Cron>("crons"), {
+  const cronsBase = createCronStore(artifactMap<Cron>("crons", ["ownerScopeId"]), {
     staleRunningMs: config.runMaxAgeMs,
     fires: cronFires,
   });
@@ -2041,7 +2061,10 @@ export function buildApp(
       `UPDATE crons c SET json = jsonb_set(c.json, '{enabled}', 'true') FROM suggested_activity_profiles p WHERE p.json ->> 'cronId' = c.id AND (p.json ->> 'autoPaused')::boolean`,
     ],
   });
-  const webhooks = createWebhookStore(artifactMap<Webhook>("webhooks"), artifactMap<WebhookHistory>("webhook_history"));
+  const webhooks = createWebhookStore(
+    artifactMap<Webhook>("webhooks", ["ownerScopeId"]),
+    artifactMap<WebhookHistory>("webhook_history"),
+  );
   pgArtifactMap?.pool.registerMigration({
     id: "durable-map/webhooks/0002-disable-rows-orphaned-by-webhook-removal",
     legacyId: "durable-map/webhooks/0002-disable-rows-orphaned-by-webhook-removal",
@@ -2221,7 +2244,7 @@ export function buildApp(
     serviceCreds,
     deliveries,
     approvals,
-    approvalGrants: artifactMap<CommandApprovalGrant>("approval_grants"),
+    approvalGrants: artifactMap<CommandApprovalGrant>("approval_grants", ["actorId"]),
     ...(processes ? { processes } : {}),
     monitors,
     crons,

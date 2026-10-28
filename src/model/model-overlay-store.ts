@@ -17,17 +17,24 @@ export function createModelOverlayStore(
   write: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn(),
   verifier?: ModelVerifier,
 ) {
-  async function verificationReason(row: StoredModelOverlay, id: string): Promise<string | undefined> {
+  async function verify(row: StoredModelOverlay, id: string): Promise<{ reason?: string; settled: boolean }> {
     if (!row?.verification || !verifier)
-      return "Model has not been verified; an administrator must verify and enable it.";
+      return { reason: "Model has not been verified; an administrator must verify and enable it.", settled: true };
     try {
       const context = await verifier(parseRegisteredModel({ ...row.spec, id }));
-      if (context.fingerprint === row.verification.fingerprint) return undefined;
-      return "Model settings or serving credentials changed; verify and enable this model again.";
+      if (context.fingerprint === row.verification.fingerprint) return { settled: true };
+      return {
+        reason: "Model settings or serving credentials changed; verify and enable this model again.",
+        settled: true,
+      };
     } catch {
-      return "Model verification is no longer valid; check serving credentials and verify again.";
+      return {
+        reason: "Model verification is no longer valid; check serving credentials and verify again.",
+        settled: false,
+      };
     }
   }
+  const verificationReason = async (row: StoredModelOverlay, id: string) => (await verify(row, id)).reason;
   return {
     async statuses() {
       return Promise.all(
@@ -54,16 +61,19 @@ export function createModelOverlayStore(
     async refresh() {
       const rows = await backing.entries();
       const failures = new Map<string, string>();
+      let settled = true;
       for (const [id, row] of rows) {
         if (!row || row.disabled) continue;
-        const reason = await verificationReason(row, id);
-        if (reason) failures.set(id, reason);
+        const verified = await verify(row, id);
+        if (verified.reason) failures.set(id, verified.reason);
+        settled &&= verified.settled;
       }
       setModelOverlays(
         rows.filter(([, row]) => row?.disabled !== true).map(([id, row]) => ({ ...row?.spec, id })),
         rows.filter(([, row]) => row?.disabled === true).map(([id]) => id),
         failures,
       );
+      return settled;
     },
     async upsert(value: unknown, updatedBy: string) {
       const spec = validateModelOverlay(value);

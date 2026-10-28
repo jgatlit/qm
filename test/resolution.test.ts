@@ -4,8 +4,8 @@ import { createMemoryConfigStore } from "../src/resolution/config-store.ts";
 import { composeSoul, createResolutionService } from "../src/resolution/resolution-service.ts";
 import { createAclStore } from "../src/acl/acl-store.ts";
 import { scopeId, type Conversation, type Principal } from "../src/types.ts";
-import { createMemoryMap } from "../src/persistence/durable-map.ts";
-import type { PersistedEgressPolicy, PersistedSoul } from "../src/resolution/config-store.ts";
+import { createMemoryMap, type DurableMap } from "../src/persistence/durable-map.ts";
+import type { ConfigStoreMaps, PersistedEgressPolicy, PersistedSoul } from "../src/resolution/config-store.ts";
 
 const actor: Principal = { id: "U1", type: "internal" };
 
@@ -120,6 +120,47 @@ test("resolution refreshes security config written by another instance", async (
   const resolved = await res.resolve(conv, actor);
   assert.match(resolved.systemPrompt, /FLEET_LIVE/);
   assert.deepEqual(resolved.egress.deniedHosts, ["blocked.example"]);
+});
+
+test("resolution rereads configuration rows only after another instance changes them", async () => {
+  const reads: string[] = [];
+  const counted = <T>(name: string): DurableMap<T> => {
+    const map = createMemoryMap<T>();
+    return {
+      ...map,
+      get: async (id) => {
+        reads.push(`${name}:${id}`);
+        return map.get(id);
+      },
+    };
+  };
+  const maps: ConfigStoreMaps = {
+    souls: counted("souls"),
+    commandPolicies: counted("commandPolicies"),
+    egressPolicies: counted("egressPolicies"),
+    sharingPostures: counted("sharingPostures"),
+    securityPostures: counted("securityPostures"),
+    approvalGrantModes: counted("approvalGrantModes"),
+  };
+  const reader = createMemoryConfigStore("default-org", maps);
+  const writer = createMemoryConfigStore("default-org", maps);
+  const res = createResolutionService("default-org", reader, createAclStore());
+  const conv: Conversation = { kind: "dm", threadRef: "dm:U1:t1", audience: [actor] };
+
+  assert.equal((await res.resolve(conv, actor)).securityPolicy.toolApprovals, "none");
+  assert.ok(reads.length > 0);
+  reads.length = 0;
+  await res.resolve(conv, actor);
+  assert.equal(reads.length, 0);
+
+  await writer.setSecurityPosture(scopeId("personal", "U1"), "strict");
+  await writer.setSoul(scopeId("personal", "U1"), "WRITTEN_ELSEWHERE");
+  reads.length = 0;
+  const changed = await res.resolve(conv, actor);
+  assert.equal(changed.securityPolicy.toolApprovals, "all");
+  assert.match(changed.systemPrompt, /WRITTEN_ELSEWHERE/);
+  assert.ok(reads.includes("securityPostures:personal:U1"));
+  assert.ok(!reads.some((read) => read.startsWith("egressPolicies:")));
 });
 
 test("deployment screening mode is capped only by dangerous posture", async () => {

@@ -30,6 +30,7 @@ const TABLES = [
   "publish_member_grants",
   "slack_quiet_status_flag",
   "base_model_configs",
+  "approval_grant_modes",
   "browse_provider_configs",
   "browse_max_steps_configs",
   "browse_model_configs",
@@ -400,4 +401,29 @@ test("pg config store: settings written on one core reach another core through r
   assert.equal(b.getBrowseMaxSteps(ch), null);
   assert.equal(b.getBrowseModel(ch), null);
   assert.equal(b.getApprovedHarnesses(), null);
+});
+
+test("pg config store: durable reads on one core see another core's writes", { skip }, async () => {
+  const reader = createMemoryConfigStore("cross-core-org", maps(createPostgresMapFactory(URL!)));
+  const writer = createMemoryConfigStore("cross-core-org", maps(createPostgresMapFactory(URL!)));
+  const ch = scopeId("channel", "C5");
+  const personal = scopeId("personal", "U5");
+
+  assert.equal(await reader.getSecurityPostureDurable(ch), "auto");
+  assert.equal(await reader.resolveSharingPostureDurable(personal, ch), "isolated");
+  assert.equal(await reader.getRuntimeSelectionDurable(ch), null);
+
+  await writer.setSecurityPosture(ch, "strict");
+  await writer.setSharingPosture(scopeId("org", "cross-core-org"), "open");
+  await writer.setSharingPosture(personal, "open");
+  await writer.setRuntimeSelection(ch, { harnessId: "pi", modelId: "claude-opus-4-8" });
+
+  assert.equal(await reader.getSecurityPostureDurable(ch), "strict");
+  assert.equal(await reader.resolveSharingPostureDurable(personal, ch), "open");
+  assert.equal((await reader.getRuntimeSelectionDurable(ch))?.modelId, "claude-opus-4-8");
+
+  await writer.setSecurityPosture(ch, "auto");
+  await writer.setRuntimeSelection(ch, null);
+  assert.equal(await reader.getSecurityPostureDurable(ch), "auto");
+  assert.equal(await reader.getRuntimeSelectionDurable(ch), null);
 });
