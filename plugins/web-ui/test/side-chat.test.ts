@@ -113,8 +113,11 @@ test("select a passage, discuss beside the source, reopen, and expand the same s
     assert.equal(anchor?.startOffset, secondDurable);
     const formatted = document.createElement("div");
     formatted.innerHTML = "<p>Use a <strong>durable</strong> queue.</p><p>Retry safely.</p>";
-    assert.equal(passageRange(formatted, "durable queue.\nRetry safely.")?.toString(), "durable queue.Retry safely.");
-    assert.equal(passageRange(formatted, "not present"), null);
+    assert.equal(
+      passageRange(formatted, "durable queue.\nRetry safely.", 0)?.toString(),
+      "durable queue.Retry safely.",
+    );
+    assert.equal(passageRange(formatted, "not present", 0), null);
     const repeated = document.createElement("div");
     repeated.innerHTML = "<p>again, then again </p>";
     const repeatedText = repeated.querySelector("p")!.firstChild!;

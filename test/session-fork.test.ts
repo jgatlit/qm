@@ -127,10 +127,15 @@ test("side chats preserve their anchor, stay out of session pages, and expand in
   const entry = source.entries[0]!;
   const fork = await app.forkSession(source.session.id, "U1", {
     upToSeq: source.entries.at(-1)!.seq,
-    sideChat: { entrySeq: entry.seq, quote: "shared queues" },
+    sideChat: { entrySeq: entry.seq, quote: "shared queues", occurrence: 0 },
   });
   assert.ok(fork);
-  assert.deepEqual(fork.session.sideChat, { entrySeq: entry.seq, quote: "shared queues", expanded: false });
+  assert.deepEqual(fork.session.sideChat, {
+    entrySeq: entry.seq,
+    quote: "shared queues",
+    occurrence: 0,
+    expanded: false,
+  });
   assert.equal((await app.sideChats("U1", source.session.id))![0]!.id, fork.session.id);
   assert.equal(await app.sideChats("stranger", source.session.id), null);
   assert.equal(await app.expandSideChat("stranger", fork.session.id), null);
@@ -152,10 +157,10 @@ test("side chats reject missing anchors and anchors beyond the fork boundary", a
   const result = await app.turn(dm("Explain shared queues", "web:U1:bad-side-chat"));
   const source = (await app.getSession(result.sessionId!))!;
   const last = source.entries.at(-1)!.seq;
-  for (const occurrence of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+  for (const occurrence of [undefined, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
     await assert.rejects(
       app.forkSession(source.session.id, "U1", {
-        sideChat: { entrySeq: 0, quote: "shared queues", occurrence },
+        sideChat: { entrySeq: 0, quote: "shared queues", occurrence: occurrence as number },
       }),
       SideChatAnchorError,
     );
@@ -163,14 +168,14 @@ test("side chats reject missing anchors and anchors beyond the fork boundary", a
   await assert.rejects(
     app.forkSession(source.session.id, "U1", {
       upToSeq: last,
-      sideChat: { entrySeq: last + 1, quote: "not visible" },
+      sideChat: { entrySeq: last + 1, quote: "not visible", occurrence: 0 },
     }),
     SideChatAnchorError,
   );
   await assert.rejects(
     app.forkSession(source.session.id, "U1", {
       upToSeq: last,
-      sideChat: { entrySeq: 0, quote: " " },
+      sideChat: { entrySeq: 0, quote: " ", occurrence: 0 },
     }),
     SideChatAnchorError,
   );
@@ -180,7 +185,7 @@ test("side-chat reads bind the query principal to the authenticated portal ident
   const { app } = freshApp();
   const result = await app.turn(dm("Explain shared queues", "web:U1:side-chat-auth"));
   const fork = await app.forkSession(result.sessionId!, "U1", {
-    sideChat: { entrySeq: 0, quote: "shared queues" },
+    sideChat: { entrySeq: 0, quote: "shared queues", occurrence: 0 },
   });
   assert.ok(fork);
   const sourceSecret = "side-chat-source-secret-for-http-tests";
@@ -216,7 +221,10 @@ test("side-chat reads bind the query principal to the authenticated portal ident
     assert.equal((await read("U1")).status, 401);
     assert.equal((await read("U2", "U2")).status, 404);
     const forkPath = `/v1/sessions/${result.sessionId}/fork?nonce=${crypto.randomUUID()}`;
-    const forkBody = JSON.stringify({ principalId: "U1", sideChat: { entrySeq: 999, quote: "shared queues" } });
+    const forkBody = JSON.stringify({
+      principalId: "U1",
+      sideChat: { entrySeq: 999, quote: "shared queues", occurrence: 0 },
+    });
     const rejected = await fetch(base + forkPath, {
       method: "POST",
       headers: {

@@ -37,7 +37,7 @@ function matchRange(
   return range;
 }
 
-export function passageRange(root: Element, quote: string, occurrence = 0): Range | null {
+export function passageRange(root: Element, quote: string, occurrence: number): Range | null {
   const needle = quote.replace(/\s+/g, " ").trim();
   const { text, positions } = normalizedText(root);
   let start = -1;

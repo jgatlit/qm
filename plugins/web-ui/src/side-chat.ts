@@ -435,7 +435,7 @@ export function createSideChatController(ctx: ConvCtx) {
                   host,
                   row
                     ? matches.flatMap((session) => {
-                        const range = passageRange(row, session.sideChat!.quote, session.sideChat!.occurrence ?? 0);
+                        const range = passageRange(row, session.sideChat!.quote, session.sideChat!.occurrence);
                         return range ? [{ session, range }] : [];
                       })
                     : [],

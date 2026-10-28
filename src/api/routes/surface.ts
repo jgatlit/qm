@@ -122,7 +122,7 @@ async function forkSession(ctx: ApiCtx): Promise<void> {
   if (b.upToSeq !== undefined && (typeof b.upToSeq !== "number" || !Number.isInteger(b.upToSeq) || b.upToSeq < 0)) {
     return sendJson(res, 400, { error: "bad_request", message: "upToSeq must be a non-negative integer" });
   }
-  let sideChat: { entrySeq: number; quote: string; occurrence?: number } | undefined;
+  let sideChat: { entrySeq: number; quote: string; occurrence: number } | undefined;
   if (b.sideChat !== undefined) {
     if (!isSideChatAnchor(b.sideChat)) {
       return sendJson(res, 400, {
@@ -133,7 +133,7 @@ async function forkSession(ctx: ApiCtx): Promise<void> {
     sideChat = {
       entrySeq: b.sideChat.entrySeq,
       quote: b.sideChat.quote,
-      ...(typeof b.sideChat.occurrence === "number" ? { occurrence: b.sideChat.occurrence } : {}),
+      occurrence: b.sideChat.occurrence,
     };
   }
   let out: Awaited<ReturnType<typeof app.forkSession>>;
