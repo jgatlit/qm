@@ -84,7 +84,7 @@ test("work duration survives a transcript refresh — persisted turn timing wins
     activity: [],
   };
   const liveLabel = workedLabel("Worked", workSeconds(liveWork));
-  assert.equal(liveLabel, "Worked for 13s");
+  assert.equal(liveLabel, "Worked for 13.00s");
 
   const msgs = entriesToMessages(entries, MODEL);
   const rebuilt = (msgs[1] as AssistantWork).work;
@@ -108,7 +108,7 @@ test("fold expansion does not change the duration — the label derives only fro
 
   const before = workedLabel("Worked", workSeconds(work));
   const after = workedLabel("Worked", workSeconds(work));
-  assert.equal(before, "Worked for 13s");
+  assert.equal(before, "Worked for 13.00s");
   assert.equal(after, before, "re-rendering (fold toggle) yields the identical label");
 
   const realNow = Date.now;
@@ -132,16 +132,40 @@ test("historical transcripts without persisted timing keep the activity-inferenc
   assert.equal(work?.finishedAt, 130);
 });
 
-test("live and completed work use compact minute and second labels", () => {
+test("live and completed work include centiseconds with minute rollover", () => {
   for (const prefix of ["Working", "Worked"]) {
     for (const [seconds, duration] of [
-      [7, "7s"],
-      [60, "1m"],
-      [65, "1m 5s"],
-      [365, "6m 5s"],
+      [0.12, "0.12s"],
+      [7, "7.00s"],
+      [57.239, "57.23s"],
+      [59.999, "59.99s"],
+      [60, "1m 00.00s"],
+      [65.129, "1m 05.12s"],
+      [365, "6m 05.00s"],
     ] as const)
       assert.equal(workedLabel(prefix, seconds), `${prefix} for ${duration}`);
   }
+});
+
+test("work timing keeps fractions through live updates, completion and transcript refresh", (t) => {
+  t.mock.method(Date, "now", () => 157_239);
+  const work: WorkBlock = { status: "working", startedAt: 100_000, activity: [] };
+  assert.equal(workedLabel("Working", workSeconds(work)), "Working for 57.23s");
+  work.status = "complete";
+  work.finishedAt = 157_239;
+  const entries: SessionEntry[] = [
+    { seq: 1, type: "user", payload: { text: "hello" }, createdAt: 100_000 },
+    { seq: 2, type: "tool_call", parentSeq: 1, payload: { tool: "execute" }, createdAt: 101_000 },
+    {
+      seq: 3,
+      type: "assistant",
+      payload: { text: "done", workStartedAt: 100_000, workFinishedAt: 157_239 },
+      createdAt: 157_239,
+    },
+  ];
+  const rebuilt = (entriesToMessages(entries, MODEL)[1] as AssistantWork).work!;
+  assert.equal(workedLabel("Worked", workSeconds(rebuilt)), "Worked for 57.23s");
+  assert.equal(workSeconds(rebuilt), workSeconds(work));
 });
 
 test("work duration ends at final-answer start while the run stays active and survives history projection", () => {

@@ -1,5 +1,5 @@
 import { currentTextPhase } from "./timeline.ts";
-import { goalElapsedLabel, type GoalStripState } from "./goal-strip.ts";
+import type { GoalStripState } from "./goal-strip.ts";
 import { workPausedForApproval, type WorkBlock } from "./core-bridge.ts";
 
 export function workSeconds(work: WorkBlock): number {
@@ -15,11 +15,15 @@ export function workSeconds(work: WorkBlock): number {
     if (live) end = Date.now();
     else end = times.length ? Math.max(...times, start) : start;
   }
-  return Math.max(0, Math.round((end - start) / 1000));
+  return Math.max(0, (end - start) / 1000);
 }
 
 export function workedLabel(prefix: string, secs: number): string {
-  return secs > 0 ? `${prefix} for ${goalElapsedLabel(0, secs * 1000)}` : prefix;
+  if (secs <= 0) return prefix;
+  const centiseconds = Math.floor(Math.round(secs * 1000) / 10);
+  const minutes = Math.floor(centiseconds / 6000);
+  const seconds = ((centiseconds % 6000) / 100).toFixed(2);
+  return `${prefix} for ${minutes ? `${minutes}m ${seconds.padStart(5, "0")}` : seconds}s`;
 }
 
 interface GoalTurn {

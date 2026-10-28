@@ -2700,6 +2700,7 @@ qm-markdown .tok-in {
 }
 .work-head {
   display: flex;
+  font-variant-numeric: tabular-nums;
   align-items: center;
   gap: 6px;
   font-size: max(min(12px, var(--chat-font-size)), calc(var(--chat-font-size) * var(--text-scale)));

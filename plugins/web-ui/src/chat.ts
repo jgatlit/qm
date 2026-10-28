@@ -216,6 +216,7 @@ import { base64ToBytes } from "./paste-text";
 import { pageAnchor, storeTranscript } from "./transcript-cache";
 import { tip } from "./tooltip";
 import { goalWorked, workSeconds, workedLabel } from "./work-duration";
+import { liveWorkLabel } from "./live-work-label";
 import { decorateTextCodeBlocks } from "./text-code";
 
 import { createTranscriptViewport } from "./transcript-viewport";
@@ -458,7 +459,7 @@ export function createChatSurface(
     readOnlyView = null;
     readonlyApprove = null;
     preserveOutgoingWorkingDot(null);
-    detachActiveAgent();
+    detachActiveChat();
     chatState.agent = null;
     clearLiveWork();
     resetBackgroundPanel();
@@ -527,7 +528,8 @@ export function createChatSurface(
     sessionsState.list = markWorking(sessionsState.list, live);
   }
 
-  function detachActiveAgent(): void {
+  function detachActiveChat(): void {
+    if (chatState.host) render(nothing, chatState.host);
     if (!chatState.agent) return;
     detachedAgents.add(chatState.agent);
     chatState.agent.abort();
@@ -548,7 +550,7 @@ export function createChatSurface(
     readonlyApprove = null;
     preserveOutgoingWorkingDot(threadRef);
     dropAbandonedNewChat(threadRef);
-    detachActiveAgent();
+    detachActiveChat();
     ctx.composer.resetComposer();
     forkOriginController.reset();
     chatState.threadRef = threadRef;
@@ -1222,7 +1224,7 @@ export function createChatSurface(
     if (!container) return;
     preserveOutgoingWorkingDot(s.threadRef);
     dropAbandonedNewChat(s.threadRef);
-    detachActiveAgent();
+    detachActiveChat();
     chatState.agent = null;
     clearLiveWork();
     chatState.host = null;
@@ -2971,20 +2973,20 @@ export function createChatSurface(
     if (posting) {
       return {
         icon: MessageSquare,
-        label: secs > 0 ? `Posting message for ${secs}s` : "Posting message",
+        label: workedLabel("Posting message", secs),
         detail: firstLine(posting, 60),
       };
     }
     return {
       icon: meta.icon,
-      label: secs > 0 ? `${meta.active} for ${secs}s` : meta.active,
+      label: workedLabel(meta.active, secs),
       detail: toolDetail(tool, call, result),
     };
   }
 
   function elapsedSeconds(startedAt: number | null | undefined): number {
     if (typeof startedAt !== "number" || startedAt <= 0) return 0;
-    return Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+    return Math.max(0, (Date.now() - startedAt) / 1000);
   }
 
   function usedToolsSuffix(work: WorkBlock): string {
@@ -3050,7 +3052,10 @@ export function createChatSurface(
               ?open=${last && (active || !!work.pendingApprovals?.length)}
             >
               <summary class=${stopped && last ? "stopped-head" : "work-head"}>
-                ${sheenLabel(label, animating)}<span class="activity-chevron">${icon(ChevronRight, 14)}</span>
+                ${last && animating && work.status === "working" && !work.stale ? liveWorkLabel(work) : sheenLabel(label, animating)}<span
+                  class="activity-chevron"
+                  >${icon(ChevronRight, 14)}</span
+                >
               </summary>
               ${stopped && last ? nothing : html`<div class="work-divider"></div>`}
               <div class="work-rows">
