@@ -614,7 +614,6 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
         settleGrace = undefined;
         if (pendingPrompts === 0 && backgroundTasksSettled() && !sessionStateSeen) void closeQueue();
       }, settleGraceMs);
-      settleGrace.unref?.();
     };
     const recordedEnvelope = {
       system: turn.systemPrompt,
