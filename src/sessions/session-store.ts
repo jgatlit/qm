@@ -576,9 +576,15 @@ export interface SessionStore {
   setParentSession(sessionId: string, parentSessionId: string | null): Promise<void>;
   setSpawnMeta(sessionId: string, meta: SpawnMeta): Promise<void>;
   childrenOf(parentSessionId: string): Promise<Session[]>;
+  sideChatsOf(sessionId: string): Promise<Session[]>;
+  expandSideChat(sessionId: string): Promise<void>;
   updateForkProvenance(
     sessionId: string,
-    provenance: { forkedFrom: { sessionId: string; title?: string | null }; forkBoundarySeq: number },
+    provenance: {
+      forkedFrom: { sessionId: string; title?: string | null };
+      forkBoundarySeq: number;
+      sideChat?: Session["sideChat"];
+    },
   ): Promise<void>;
 
   readonly leaseTtlMs: number;

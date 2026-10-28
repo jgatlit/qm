@@ -193,6 +193,7 @@ export interface ComposerSubmission {
 
 export interface ComposerOptions {
   prepareSubmit?: () => (text: string, options: ComposerSubmission) => Promise<void>;
+  includeSideChatExcerpt?: () => boolean;
   placeholder?: string;
   preferenceKey?: string;
   runtimeAccount?: "company";
@@ -1575,8 +1576,18 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     if (!composerCanSend()) return;
     if (composerState.pasteView) closePasteView(agent);
     if (agent.state.isStreaming) return queueDraft(agent);
-    const text = composerState.draft.trim();
-    if (!text && composerState.attachments.length === 0) return;
+    const draft = composerState.draft.trim();
+    if (!draft && composerState.attachments.length === 0) return;
+    const sideChat = ctx.chat.state.forkSession?.sideChat;
+    const text =
+      sideChat?.quote && !agent.state.messages.length && (options.includeSideChatExcerpt?.() ?? true)
+        ? `${sideChat.quote
+            .split("\n")
+            .map((line) => `> ${line}`)
+            .join("\n")}
+
+${draft}`
+        : draft;
     const submit = options.prepareSubmit?.();
     if (submit) {
       const selected = currentModelOption()!;

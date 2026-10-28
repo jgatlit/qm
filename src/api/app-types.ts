@@ -368,6 +368,8 @@ export interface App {
   unpinConversationItem(threadRef: string, pinId: string): Promise<boolean | null>;
   listSessions(principalId: string): Promise<Session[]>;
   listSessionPage(principalId: string, query: SessionPageQuery): Promise<SessionPageResult>;
+  sideChats(principalId: string, sessionId: string): Promise<Session[] | null>;
+  expandSideChat(principalId: string, sessionId: string): Promise<Session | null>;
   sessionChildren(principalId: string, sessionId: string): Promise<Session[] | null>;
   sessionRow(principalId: string, ref: { id?: string; threadRef?: string }): Promise<Session | null>;
   searchResources(
@@ -417,7 +419,7 @@ export interface App {
   forkSession(
     sessionId: string,
     principalId: string,
-    opts?: { upToSeq?: number },
+    opts?: { upToSeq?: number; sideChat?: { entrySeq: number; quote: string; occurrence?: number } },
   ): Promise<{ session: Session; entries: SessionEntry[] } | null>;
   listFilesForViewer(principalId: string, opts?: ListOwnedOptions, inScope?: ScopeId): Promise<FileListPage>;
   uploadFileForViewer(

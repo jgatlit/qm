@@ -1,3 +1,4 @@
+import { isSideChatAnchor } from "../sessions/side-chat.ts";
 import { composeSoul } from "../resolution/resolution-service.ts";
 import { createCurrentScopeMembers } from "../resolution/scope-membership.ts";
 import { notifyDeploymentShared } from "../deploy/share-notice.ts";
@@ -80,6 +81,8 @@ export function createSessionMethods(
   | "listSessions"
   | "listSessionPage"
   | "sessionChildren"
+  | "sideChats"
+  | "expandSideChat"
   | "sessionRow"
   | "searchSessions"
   | "sessionBackground"
@@ -613,6 +616,23 @@ export function createSessionMethods(
       };
     },
 
+    async sideChats(principalId, sessionId) {
+      if (!(await sessionForViewer(sessionId, principalId))) return null;
+      const rows = await deps.sessions.sideChatsOf(sessionId);
+      const visible = await Promise.all(rows.map((row) => sessionForViewer(row.id, principalId)));
+      return decorateSessions(
+        principalId,
+        visible.filter((row): row is Session => row !== null),
+      );
+    },
+
+    async expandSideChat(principalId, sessionId) {
+      const session = await sessionForViewer(sessionId, principalId);
+      if (!session?.sideChat || !(await mayWriteSession(principalId, session))) return null;
+      await deps.sessions.expandSideChat(sessionId);
+      return sessionForViewer(sessionId, principalId);
+    },
+
     async sessionChildren(principalId, sessionId) {
       const root = await sessionForViewer(sessionId, principalId);
       if (!root) return null;
@@ -1050,6 +1070,11 @@ export function createSessionMethods(
         }
         const upToSeq = opts?.upToSeq;
         const copied = upToSeq === undefined ? visible : visible.filter((entry) => entry.seq <= upToSeq);
+        if (
+          opts?.sideChat &&
+          (!isSideChatAnchor(opts.sideChat) || !copied.some((entry) => entry.seq === opts.sideChat!.entrySeq))
+        )
+          return null;
         const threadRef = `web:${principalId}:${randomUUID()}`;
         const forked = await deps.sessions.getOrCreateByThread(
           threadRef,
@@ -1077,6 +1102,7 @@ export function createSessionMethods(
           await deps.sessions.updateForkProvenance(forked.id, {
             forkedFrom: { sessionId, title: source.title ?? null },
             forkBoundarySeq,
+            ...(opts?.sideChat ? { sideChat: { ...opts.sideChat, expanded: false } } : {}),
           });
         }
         const sourceTitle = source.title?.trim();

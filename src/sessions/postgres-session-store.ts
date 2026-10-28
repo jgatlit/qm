@@ -126,6 +126,7 @@ export function rowToSession(r: Record<string, unknown>): Session {
     createdAt: Number(r.created_at),
     ...(r.title != null ? { title: r.title as string } : {}),
     ...(r.channel_name != null ? { channelName: r.channel_name as string } : {}),
+    ...(r.side_chat ? { sideChat: r.side_chat as Session["sideChat"] } : {}),
     ...(r.forked_from_session_id != null && r.fork_boundary_seq != null
       ? {
           forkedFrom: {
@@ -207,7 +208,7 @@ const ITEM_FIELDS = `i.session_id, i.seq, ${ITEM_COLUMNS.map(([column, key]) => 
 const ITEM_FROM = "items i JOIN sessions ts ON ts.id = i.session_id";
 const TENANT = "qm_tenant_id()";
 const LIST_COLUMNS = `s.id, s.type, s.scope_id, s.thread_ref, s.surface, s.created_at, s.title, s.channel_name,
-  s.forked_from_session_id, s.forked_from_title, s.fork_boundary_seq, s.parent_session_id`;
+  s.forked_from_session_id, s.forked_from_title, s.fork_boundary_seq, s.parent_session_id, s.side_chat`;
 const USER_ACTIVITY = "COALESCE(s.last_user_activity, s.created_at)";
 const AUTOMATION_SURFACES = "('cron', 'webhook', 'loop')";
 
@@ -355,6 +356,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     const where: string[] = [
       "p.principal_id = $1",
       "s.parent_session_id IS NULL",
+      "(s.side_chat IS NULL OR s.side_chat->>'expanded' = 'true')",
       `(s.surface IS NULL OR s.surface NOT IN ${AUTOMATION_SURFACES})`,
       HAS_CONTENT,
     ];
@@ -1065,6 +1067,13 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         prepare: [LAST_USER_ACTIVITY_BACKFILL_SQL],
         statements: [],
       },
+      {
+        id: "sessions/store/0045-side-chats",
+        statements: [
+          `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS side_chat JSONB`,
+          `CREATE INDEX IF NOT EXISTS sessions_side_chat_origin ON sessions (forked_from_session_id) WHERE side_chat IS NOT NULL`,
+        ],
+      },
     ],
     [
       {
@@ -1248,10 +1257,31 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
       await q("UPDATE sessions SET title = $2 WHERE id = $1", [sessionId, title]);
     },
 
+    async sideChatsOf(sessionId) {
+      const rows = await q(
+        "SELECT * FROM sessions WHERE forked_from_session_id = $1 AND side_chat IS NOT NULL ORDER BY created_at",
+        [sessionId],
+      );
+      return rows.map(rowToSession);
+    },
+
+    async expandSideChat(sessionId) {
+      await q(
+        "UPDATE sessions SET side_chat = jsonb_set(side_chat, '{expanded}', 'true') WHERE id = $1 AND side_chat IS NOT NULL",
+        [sessionId],
+      );
+    },
+
     async updateForkProvenance(sessionId, provenance): Promise<void> {
       await q(
-        "UPDATE sessions SET forked_from_session_id = $2, forked_from_title = $3, fork_boundary_seq = $4 WHERE id = $1",
-        [sessionId, provenance.forkedFrom.sessionId, provenance.forkedFrom.title ?? null, provenance.forkBoundarySeq],
+        "UPDATE sessions SET forked_from_session_id = $2, forked_from_title = $3, fork_boundary_seq = $4, side_chat = $5 WHERE id = $1",
+        [
+          sessionId,
+          provenance.forkedFrom.sessionId,
+          provenance.forkedFrom.title ?? null,
+          provenance.forkBoundarySeq,
+          provenance.sideChat ? JSON.stringify(provenance.sideChat) : null,
+        ],
       );
     },
 
