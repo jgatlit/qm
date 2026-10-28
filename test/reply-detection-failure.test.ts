@@ -9,8 +9,8 @@ import { createMemoryConfigStore } from "../src/resolution/config-store.ts";
 import { createAclStore } from "../src/acl/acl-store.ts";
 import { createResolutionService } from "../src/resolution/resolution-service.ts";
 import { createMemorySessionStore } from "../src/sessions/memory-session-store.ts";
-import { createLocalWorkspaceStore } from "../src/workspace/workspace-store.ts";
-import { createMemoryService } from "../src/memory/memory-service.ts";
+import { createLocalWorkspaceStore, type WorkspaceStore } from "../src/workspace/workspace-store.ts";
+import { createMemoryService, type MemoryService } from "../src/memory/memory-service.ts";
 import { createModelGateway } from "../src/model/model-gateway.ts";
 import { createAuditLog } from "../src/audit/audit-log.ts";
 import { createErrorLog } from "../src/admin/error-log.ts";
@@ -28,25 +28,7 @@ import { singleProcessDeps } from "./support/single-process.ts";
 
 const actor: Principal = { id: "U1", type: "internal" };
 
-test("an ambient message whose reply detection fails stays silent and leaves the failure in the error and audit logs", async () => {
-  const base = createMockHarness();
-  let ran = false;
-  const harness: Harness = {
-    ...base,
-    turns: {
-      ...base.turns,
-      runTurn: async () => {
-        ran = true;
-        return { reply: "spurious" };
-      },
-    },
-    models: {
-      ...base.models,
-      shouldRespond: async () => {
-        throw new Error("401 invalid x-api-key");
-      },
-    },
-  };
+function ambientOrchestrator(harness: Harness, memory?: (workspace: WorkspaceStore) => MemoryService) {
   const config = createMemoryConfigStore("default-org");
   const acl = createAclStore();
   const auditLog = createAuditLog();
@@ -67,7 +49,7 @@ test("an ambient message whose reply detection fails stays silent and leaves the
     errors,
     rateLimiter: createRateLimiter({ maxPerWindow: 1000, windowMs: 60_000 }),
     harness,
-    memory: createMemoryService(workspace),
+    memory: memory?.(workspace) ?? createMemoryService(workspace),
     deploy: createDeployService({
       ...singleProcessDeps(),
       deployStore: createDeployStore(),
@@ -78,6 +60,29 @@ test("an ambient message whose reply detection fails stays silent and leaves the
     }),
     acl,
   });
+  return { orch, auditLog, errors };
+}
+
+test("an ambient message whose reply detection fails stays silent and leaves the failure in the error and audit logs", async () => {
+  const base = createMockHarness();
+  let ran = false;
+  const harness: Harness = {
+    ...base,
+    turns: {
+      ...base.turns,
+      runTurn: async () => {
+        ran = true;
+        return { reply: "spurious" };
+      },
+    },
+    models: {
+      ...base.models,
+      shouldRespond: async () => {
+        throw new Error("401 invalid x-api-key");
+      },
+    },
+  };
+  const { orch, auditLog, errors } = ambientOrchestrator(harness);
 
   const result = await orch.handleTurn({
     surface: "slack",
@@ -104,43 +109,19 @@ test("an ambient message the agent stays out of never searches memory", async ()
     ...base,
     models: { ...base.models, shouldRespond: async () => ({ respond: false, reason: "not addressed" }) },
   };
-  const config = createMemoryConfigStore("default-org");
-  const acl = createAclStore();
-  const auditLog = createAuditLog();
-  const workspace = createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "rdf-")));
-  const memory = createMemoryService(workspace);
-  await memory.capture("channel:C1", ["the deploy pipeline runs on Tuesdays"], Date.now());
   let recalls = 0;
-  const recall = memory.recall.bind(memory);
-  memory.recall = async (scope, context) => {
-    recalls++;
-    return recall(scope, context);
-  };
-  const orch = createOrchestrator({
-    ...singleProcessDeps(),
-    identity: createIdentityService(),
-    resolution: createResolutionService("default-org", config, acl),
-    sessions: createMemorySessionStore(),
-    workspace,
-    files: createMemoryFileArtifactStore(createMemoryDurableByteStore()),
-    sandbox: {
-      profile: { backend: "fake", writablePersistence: "snapshot_to_workspace", processSessions: false },
-    } as Sandbox,
-    modelGateway: createModelGateway(),
-    auditLog,
-    rateLimiter: createRateLimiter({ maxPerWindow: 1000, windowMs: 60_000 }),
-    harness,
-    memory,
-    deploy: createDeployService({
-      ...singleProcessDeps(),
-      deployStore: createDeployStore(),
-      provider: createDockerDeployProvider(),
-      deployDir: join(tmpdir(), "rdf-deploy"),
-      auditLog,
-      acl,
-    }),
-    acl,
+  let captured: Promise<unknown> = Promise.resolve();
+  const { orch } = ambientOrchestrator(harness, (workspace) => {
+    const memory = createMemoryService(workspace);
+    captured = memory.capture("channel:C1", ["the deploy pipeline runs on Tuesdays"], Date.now());
+    const recall = memory.recall.bind(memory);
+    memory.recall = async (scope, context) => {
+      recalls++;
+      return recall(scope, context);
+    };
+    return memory;
   });
+  await captured;
 
   const result = await orch.handleTurn({
     surface: "slack",

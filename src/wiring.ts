@@ -441,7 +441,7 @@ import {
 } from "./deployment/deployment-layer-store.ts";
 import { createPostgresErrorLog } from "./admin/postgres-error-log.ts";
 import { errMessage, reportFailureAs, swallowAs } from "./util/errors.ts";
-import { createKeyedQueue, sleep, withTimeout } from "./util/async.ts";
+import { sleep, withTimeout } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
 
 export interface Runtime {
@@ -1413,8 +1413,23 @@ export function buildApp(
     setCustomProviders(await customProviders.enabled());
   };
   let refreshedModels: { versions: string; routes: unknown } | undefined;
-  const modelRefreshes = createKeyedQueue();
-  const refreshModels = () => modelRefreshes("models", refreshModelsNow);
+  let modelRefresh: Promise<void> | undefined;
+  let nextModelRefresh: Promise<void> | undefined;
+  const refreshModels = (): Promise<void> => {
+    if (!modelRefresh) {
+      modelRefresh = refreshModelsNow().finally(() => {
+        modelRefresh = undefined;
+      });
+      return modelRefresh;
+    }
+    nextModelRefresh ??= modelRefresh
+      .catch(() => undefined)
+      .then(() => {
+        nextModelRefresh = undefined;
+        return refreshModels();
+      });
+    return nextModelRefresh;
+  };
   const refreshModelsNow = async () => {
     await gatewayCatalog?.refresh();
     const versions = (await Promise.all(modelInputs.map((map) => map.version()))).join(":");
