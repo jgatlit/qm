@@ -1580,7 +1580,10 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     if (!draft && composerState.attachments.length === 0) return;
     const sideChat = ctx.chat.state.forkSession?.sideChat;
     const text =
-      sideChat?.quote && !agent.state.messages.length && (options.includeSideChatExcerpt?.() ?? true)
+      sideChat?.quote &&
+      !sideChat.expanded &&
+      !agent.state.messages.length &&
+      (options.includeSideChatExcerpt?.() ?? true)
         ? `${sideChat.quote
             .split("\n")
             .map((line) => `> ${line}`)

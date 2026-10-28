@@ -20,7 +20,7 @@ import {
 } from "../../model/pi-models.ts";
 import { builtInModelCatalog, selectableCatalogForHarness, selectableModelCatalog } from "../../model/model-catalog.ts";
 import { errMessage } from "../../util/errors.ts";
-import { SoulUpdateDeniedError, type SessionPageStatus } from "../app-types.ts";
+import { SideChatAnchorError, SoulUpdateDeniedError, type SessionPageStatus } from "../app-types.ts";
 import { renderAgentApis } from "../agent-api-catalog.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS } from "../../auth/capability-token.ts";
 import { contentTypeWithUtf8Charset, pipeToResponse, sendJson } from "../http.ts";
@@ -127,7 +127,7 @@ async function forkSession(ctx: ApiCtx): Promise<void> {
     if (!isSideChatAnchor(b.sideChat)) {
       return sendJson(res, 400, {
         error: "bad_request",
-        message: "sideChat requires a saved entry and a quote of up to 10000 characters",
+        message: "sideChat requires a saved entry and a nonempty quote",
       });
     }
     sideChat = {
@@ -136,7 +136,16 @@ async function forkSession(ctx: ApiCtx): Promise<void> {
       ...(typeof b.sideChat.occurrence === "number" ? { occurrence: b.sideChat.occurrence } : {}),
     };
   }
-  const out = await app.forkSession(id, b.principalId, { upToSeq: b.upToSeq as number | undefined, sideChat });
+  let out: Awaited<ReturnType<typeof app.forkSession>>;
+  try {
+    out = await app.forkSession(id, b.principalId, {
+      ...(b.upToSeq !== undefined ? { upToSeq: b.upToSeq } : {}),
+      ...(sideChat ? { sideChat } : {}),
+    });
+  } catch (e) {
+    if (e instanceof SideChatAnchorError) return sendJson(res, 400, { error: "bad_request", message: e.message });
+    throw e;
+  }
   if (!out) return sendJson(res, 404, { error: "not_found" });
   return sendJson(res, 200, out);
 }

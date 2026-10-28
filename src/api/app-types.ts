@@ -793,6 +793,13 @@ export class SoulUpdateDeniedError extends Error {
   }
 }
 
+export class SideChatAnchorError extends Error {
+  constructor() {
+    super("sideChat needs a nonempty quote and an entrySeq inside the forked range");
+    this.name = "SideChatAnchorError";
+  }
+}
+
 export class SoulVersionConflictError extends Error {
   constructor() {
     super("Guidance changed; read it and retry the edit.");

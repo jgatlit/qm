@@ -9,7 +9,6 @@ export function isSideChatAnchor(value: unknown): value is Omit<NonNullable<Sess
     anchor.entrySeq >= 0 &&
     typeof anchor.quote === "string" &&
     Boolean(anchor.quote.trim()) &&
-    anchor.quote.length <= 10000 &&
     (anchor.occurrence === undefined ||
       (typeof anchor.occurrence === "number" && Number.isSafeInteger(anchor.occurrence) && anchor.occurrence >= 0))
   );

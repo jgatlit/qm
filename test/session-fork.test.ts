@@ -10,6 +10,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildApp } from "./support/build-app.ts";
+import { SideChatAnchorError } from "../src/api/app-types.ts";
 import type { TurnRequest } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
 
@@ -152,26 +153,26 @@ test("side chats reject missing anchors and anchors beyond the fork boundary", a
   const source = (await app.getSession(result.sessionId!))!;
   const last = source.entries.at(-1)!.seq;
   for (const occurrence of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
-    assert.equal(
-      await app.forkSession(source.session.id, "U1", {
+    await assert.rejects(
+      app.forkSession(source.session.id, "U1", {
         sideChat: { entrySeq: 0, quote: "shared queues", occurrence },
       }),
-      null,
+      SideChatAnchorError,
     );
   }
-  assert.equal(
-    await app.forkSession(source.session.id, "U1", {
+  await assert.rejects(
+    app.forkSession(source.session.id, "U1", {
       upToSeq: last,
       sideChat: { entrySeq: last + 1, quote: "not visible" },
     }),
-    null,
+    SideChatAnchorError,
   );
-  assert.equal(
-    await app.forkSession(source.session.id, "U1", {
+  await assert.rejects(
+    app.forkSession(source.session.id, "U1", {
       upToSeq: last,
       sideChat: { entrySeq: 0, quote: " " },
     }),
-    null,
+    SideChatAnchorError,
   );
 });
 
@@ -214,6 +215,19 @@ test("side-chat reads bind the query principal to the authenticated portal ident
     assert.equal((await read("U1", "U2")).status, 403);
     assert.equal((await read("U1")).status, 401);
     assert.equal((await read("U2", "U2")).status, 404);
+    const forkPath = `/v1/sessions/${result.sessionId}/fork?nonce=${crypto.randomUUID()}`;
+    const forkBody = JSON.stringify({ principalId: "U1", sideChat: { entrySeq: 999, quote: "shared queues" } });
+    const rejected = await fetch(base + forkPath, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...signedRequestHeaders(sourceSecret, "POST", forkPath, forkBody),
+        "x-portal-identity": await mintSignedPayload({ p: "U1", exp: Date.now() + 60_000 }, identitySecret),
+      },
+      body: forkBody,
+    });
+    assert.equal(rejected.status, 400);
+    assert.match(((await rejected.json()) as { message: string }).message, /forked range/);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

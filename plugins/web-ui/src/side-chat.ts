@@ -211,7 +211,7 @@ export function createSideChatController(ctx: ConvCtx) {
     const messages = [...ctx.chat.state.inheritedMessages, ...(ctx.chat.state.agent?.state.messages ?? [])];
     const index = Number(row.dataset.index) + ctx.chat.state.inheritedMessages.length;
     const quote = selection.toString().trim();
-    if (index < 0 || !quote || quote.length > 10000 || !messages[index]) return dismissSelection();
+    if (index < 0 || !quote || !messages[index]) return dismissSelection();
     const occurrence = passageOccurrence(row, range, quote);
     if (occurrence === null) return dismissSelection();
     const bounds = range.getBoundingClientRect();
@@ -506,7 +506,7 @@ export function createSideChatController(ctx: ConvCtx) {
                 @lostpointercapture=${endDrag}
               >
                 <button
-                  class="side-chat-expand"
+                  class="icon-btn subtle compact"
                   aria-label=${maximized ? "Collapse side chat" : "Expand side chat"}
                   @click=${() => {
                     maximized = !maximized;
@@ -516,7 +516,7 @@ export function createSideChatController(ctx: ConvCtx) {
                   ${icon(maximized ? Minimize2 : Maximize2, 15)}
                 </button>
                 <button
-                  class="side-chat-expand"
+                  class="icon-btn subtle compact"
                   type="button"
                   @click=${() => void expand()}
                   ?disabled=${busy}
@@ -527,7 +527,7 @@ export function createSideChatController(ctx: ConvCtx) {
                   ${icon(ArrowUpRight, 15)}
                 </button>
                 <button
-                  class="side-chat-close"
+                  class="icon-btn subtle compact"
                   type="button"
                   aria-label="Close side chat"
                   @click=${dismiss}

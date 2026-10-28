@@ -29,6 +29,7 @@ import { projectIdFromGroupRef, projectScopeId } from "../projects/project-store
 
 import type { App, AppDeps } from "./app-types.ts";
 import {
+  SideChatAnchorError,
   SoulUpdateDeniedError,
   SoulVersionConflictError,
   toFileItem,
@@ -1074,7 +1075,7 @@ export function createSessionMethods(
           opts?.sideChat &&
           (!isSideChatAnchor(opts.sideChat) || !copied.some((entry) => entry.seq === opts.sideChat!.entrySeq))
         )
-          return null;
+          throw new SideChatAnchorError();
         const threadRef = `web:${principalId}:${randomUUID()}`;
         const forked = await deps.sessions.getOrCreateByThread(
           threadRef,
